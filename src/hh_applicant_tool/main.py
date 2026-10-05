@@ -79,6 +79,7 @@ class BaseNamespace(argparse.Namespace):
     openai_proxy_url: str
     openai_timeout: float
     openai_connect_timeout: float
+    use_developer_role: bool
     operation_run: Callable[[HHApplicantTool, BaseNamespace], None | int] | None
 
 
@@ -180,6 +181,21 @@ class HHApplicantTool(MegaTool):
             "--ai-connect-timeout",
             type=float,
             help="Таймаут соединения с OpenAI в секундах",
+        )
+        parser.add_argument(
+            "--use-developer-role",
+            "--developer-role",
+            dest="use_developer_role",
+            action="store_true",
+            # None, а не False: иначе значение из config.json никогда
+            # не дошло бы до клиента
+            default=None,
+            help=(
+                "Отправлять системный промпт ролью developer, а не system. "
+                "Нужно, когда запрос идёт через шлюз с агентом: он "
+                "добавляет свой системный промпт, второй system "
+                "отправить нельзя, а developer переопределяет основной"
+            ),
         )
         subparsers = parser.add_subparsers(help="commands")
         package_dir = Path(__file__).resolve().parent / OPERATIONS
@@ -562,6 +578,12 @@ class HHApplicantTool(MegaTool):
                 )
             )
 
+        # Флаг важнее config.json, но None значит «не задано»: так
+        # значение из конфига доходит до клиента
+        use_developer_role = self.use_developer_role
+        if use_developer_role is None:
+            use_developer_role = bool(c.get("use_developer_role"))
+
         return ai.ChatOpenAI(
             api_key=api_key,
             model=model,
@@ -569,6 +591,11 @@ class HHApplicantTool(MegaTool):
             max_completion_tokens=c.get("max_completion_tokens", 1000),
             system_prompt=system_prompt,
             base_url=base_url,
+            system_role=(
+                "developer"
+                if use_developer_role
+                else ai.DEFAULT_SYSTEM_ROLE
+            ),
             rate_limit=c.get("rate_limit", 40),
             timeout=(
                 self.openai_timeout

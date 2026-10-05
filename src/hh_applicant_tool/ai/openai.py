@@ -59,6 +59,14 @@ CAPTCHA_SCRIPT_BY_LANGUAGE = {
 _LATIN_LETTER_RE = re.compile(r"[a-z]")
 _CYRILLIC_LETTER_RE = re.compile(r"[Ѐ-ӿ]")
 
+# Роль, которой отправляется системный промпт. Схема обычно system, но
+# если запрос идёт через шлюз с агентом, тот добавляет свой системный
+# промпт, и второй system отправить нельзя. Роль developer
+# переопределяет основной системный промпт, поэтому с ней схема
+# работает через любой шлюз
+SYSTEM_ROLES = ("system", "developer")
+DEFAULT_SYSTEM_ROLE = "system"
+
 
 def captcha_script(language: str) -> str:
     """Ожидаемый алфавит ответа для запрошенного языка картинки."""
@@ -145,6 +153,8 @@ class ChatOpenAI:
 
     base_url: str
     system_prompt: str | None = None
+    # Роль системного промпта: system или developer (через шлюз)
+    system_role: str = DEFAULT_SYSTEM_ROLE
     # Общий таймаут на весь запрос
     timeout: float = DEFAULT_OPENAI_TIMEOUT
     # Отдельный таймаут только на установку соединения
@@ -170,6 +180,11 @@ class ChatOpenAI:
     _tls: local = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.system_role not in SYSTEM_ROLES:
+            raise ValueError(
+                f"Неизвестная роль системного промпта: {self.system_role!r}. "
+                f"Допустимые значения: {list(SYSTEM_ROLES)}"
+            )
         self._lock = Lock()
         self._tls = local()
 
@@ -261,7 +276,9 @@ class ChatOpenAI:
 
         # Добавляем системный промпт только если он не пустой и не None
         if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
+            messages.append(
+                {"role": self.system_role, "content": self.system_prompt}
+            )
         # Пользовательское сообщение всегда обязательно
         messages.append({"role": "user", "content": message})
 
@@ -489,7 +506,7 @@ class ChatOpenAI:
             "model": self.model,
             "messages": [
                 {
-                    "role": "system",
+                    "role": self.system_role,
                     "content": (
                         self.CAPTCHA_PROMPT_COMMON
                         + self.CAPTCHA_PROMPT_RULES[script]
