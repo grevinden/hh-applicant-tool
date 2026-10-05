@@ -26,7 +26,12 @@ import requests
 import urllib3
 
 from . import ai, api, utils
-from .api.client import DEFAULT_THROTTLE_MAX, DEFAULT_THROTTLE_MIN
+from .api.throttle import (
+    DEFAULT_THROTTLE_MAX,
+    DEFAULT_THROTTLE_MIN,
+    Throttle,
+    ThrottledSession,
+)
 from .constants import (
     CONFIG_DIR,
     CONFIG_FILENAME,
@@ -68,7 +73,7 @@ class BaseNamespace(argparse.Namespace):
     config_dir: Path
     verbosity: int
     api_delay: float
-    throttle: list[float] | None
+    throttle_range: list[float] | None
     user_agent: str
     proxy_url: str
     openai_proxy_url: str
@@ -129,8 +134,9 @@ class HHApplicantTool(MegaTool):
             nargs=2,
             type=float,
             metavar=("MIN", "MAX"),
+            dest="throttle_range",
             default=[DEFAULT_THROTTLE_MIN, DEFAULT_THROTTLE_MAX],
-            help="Случайная пауза перед каждым запросом к HH. Задаётся один раз здесь, на транспорте: запросы выстраиваются в очередь и ждут этот промежуток между собой.",
+            help="Случайная пауза между запросами к HH. Задаётся один раз здесь: и API, и логин, и страницы, и капча идут через одну очередь.",
         )
         parser.add_argument(
             "--user-agent",
@@ -219,8 +225,16 @@ class HHApplicantTool(MegaTool):
         proxies: dict[str, str],
         *,
         log_label: str,
+        throttle: Throttle | None = None,
     ) -> requests.Session:
-        session = requests.Session()
+        # Троттлящая сессия — это способ накрыть троплингом всё, что
+        # идёт к hh.ru: и ApiClient, и прямые обращения вроде логина
+        # или страницы вакансии. К OpenAI это отношения не имеет, там
+        # своя очередь в ai/openai.py, поэтому throttle там не
+        # передаётся
+        session: requests.Session = (
+            ThrottledSession(throttle) if throttle else requests.Session()
+        )
 
         if proxies:
             logger.info("Use proxies for %s: %r", log_label, proxies)
@@ -230,10 +244,25 @@ class HHApplicantTool(MegaTool):
         return session
 
     @cached_property
+    def throttle(self) -> Throttle:
+        """Очередь запросов к hh.ru, общая для всех транспортов.
+
+        Пауза между соседними запросами и гарантированный минимум
+        задаются здесь и больше нигде: ни в логике отправки отклика,
+        ни в коде автоответчика или капчи.
+        """
+        config = self.config
+        return Throttle(
+            delay=self.api_delay or config.get("api_delay"),
+            pause=self.throttle_range or config.get("throttle"),
+        )
+
+    @cached_property
     def session(self) -> requests.Session:
         session = self._create_http_session(
             self._get_proxies(),
             log_label="requests",
+            throttle=self.throttle,
         )
 
         session.cookies = HHOnlyCookieJar(str(self.cookies_file))
@@ -324,8 +353,7 @@ class HHApplicantTool(MegaTool):
             access_token=token.get("access_token"),
             refresh_token=token.get("refresh_token"),
             access_expires_at=token.get("access_expires_at"),
-            delay=self.api_delay or config.get("api_delay"),
-            throttle=self.throttle or config.get("throttle"),
+            throttle=self.throttle,
             user_agent=self.user_agent or config.get("user_agent"),
             session=self.session,
         )

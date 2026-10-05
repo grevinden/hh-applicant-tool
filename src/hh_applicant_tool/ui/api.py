@@ -457,7 +457,10 @@ class Api:
             api_delay = params.pop("api_delay", None)
             if api_delay is not None:
                 try:
-                    self._tool.api_client.delay = float(api_delay)
+                    # Пауза живёт в общей очереди запросов, а не в
+                    # клиенте: так она держит и всё, что идёт мимо
+                    # API (логин, страницы, капча)
+                    self._tool.throttle.delay = float(api_delay)
                 except (ValueError, TypeError):
                     pass
 

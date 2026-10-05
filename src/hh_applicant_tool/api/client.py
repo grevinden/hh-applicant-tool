@@ -3,15 +3,13 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-import random
 import time
 from dataclasses import dataclass
 from functools import cached_property
 from threading import Lock
-from typing import Any, Literal, Sequence, TypeVar
+from typing import Any, Literal, TypeVar
 from urllib.parse import urlencode, urljoin
 
-import requests
 from requests import Session
 
 from hh_applicant_tool.api.user_agent import generate_android_useragent
@@ -22,19 +20,12 @@ from .client_keys import (
     ANDROID_CLIENT_SECRET,
 )
 from .datatypes import AccessToken
+from .throttle import Throttle, ThrottledSession, wrap_session
 
 __all__ = ("ApiClient", "OAuthClient")
 
 HH_API_URL = "https://api.hh.ru/"
 HH_OAUTH_URL = "https://hh.ru/oauth/"
-DEFAULT_DELAY = 0.345
-# Пауза перед каждым запросом. Раньше она была вшита в три места
-# отправки отклика как random.uniform(1, 3), величина нигде не
-# настраивалась. Теперь это один параметр транспорта, и по умолчанию
-# осталось прежнее значение.
-DEFAULT_THROTTLE_MIN = 1.0
-DEFAULT_THROTTLE_MAX = 3.0
-
 AllowedMethods = Literal["GET", "POST", "PUT", "DELETE"]
 T = TypeVar("T")
 
@@ -49,24 +40,24 @@ class BaseClient:
     _: dataclasses.KW_ONLY
     user_agent: str | None = None
     session: Session | None = None
-    delay: float | None = None
-    throttle: Sequence[float] | None = None
-    _previous_request_time: float = 0.0
+    throttle: Throttle | None = None
 
     def __post_init__(self) -> None:
         assert self.base_url.endswith("/"), "base_url must ends with /"
-        self.delay = self.delay or DEFAULT_DELAY
-        if self.throttle is not None:
-            assert len(self.throttle) == 2, "throttle must be [min, max]"
-            assert self.throttle[0] >= 0, "throttle min must be >= 0"
-            assert self.throttle[0] <= self.throttle[1], "throttle min > max"
         self.user_agent = self.user_agent or generate_android_useragent()
 
         # logger.debug(f"user agent: {self.user_agent}")
 
-        if not self.session:
+        self.throttle = self.throttle or Throttle()
+        # Паузу держит сессия, а не клиент: так под неё попадает и
+        # всё, что идёт к hh.ru мимо ApiClient — логин, страница
+        # вакансии, капча, автоответчик, — потому что у инструмента
+        # один и тот же объект сессии
+        if self.session:
+            self.session = wrap_session(self.session, self.throttle)
+        else:
             logger.debug("create new session")
-            self.session = requests.session()
+            self.session = ThrottledSession(self.throttle)
 
         self.lock = Lock()
 
@@ -85,7 +76,6 @@ class BaseClient:
         method: AllowedMethods,
         endpoint: str,
         params: dict[str, Any] | None = None,
-        delay: float | None = None,
         as_json: bool = False,
         **kwargs: Any,
     ) -> T:
@@ -95,25 +85,8 @@ class BaseClient:
         params.update(kwargs)
         url = self.resolve_url(endpoint)
         with self.lock:
-            # На серваке какая-то анти-DDOS система
-            if (
-                delay := (self.delay if delay is None else delay)
-                - time.monotonic()
-                + self._previous_request_time
-            ) > 0:
-                logger.debug("wait %fs before request", delay)
-                time.sleep(delay)
-            # Случайная пауза перед запросом. Раньше такая пауза была
-            # вшита в три места отправки отклика, и её величина нигде
-            # не была настраиваемой. Теперь она живёт тут, на
-            # транспорте, и настраивается один раз флагом
-            # --throttle. Запросы идут в очередь под self.lock, так
-            # что пауза выдерживается между соседними запросами
-            # независимо от того, чтение это или запись.
-            if self.throttle:
-                pause = random.uniform(*self.throttle)
-                logger.debug("throttle %.2fs before %s", pause, method)
-                time.sleep(pause)
+            # Паузу перед запросом и отсчёт интервала делает сессия,
+            # см. api/throttle.py
             has_body = method in ["POST", "PUT"]
             payload = {
                 ["data", "json"][as_json] if has_body else "params": params
@@ -147,7 +120,6 @@ class BaseClient:
                     url,
                     params or "-",
                 )
-                self._previous_request_time = time.monotonic()
         errors.ApiError.raise_for_status(response, rv)
         assert 300 > response.status_code >= 200, (
             f"Unexpected status code for {method} {url}: {response.status_code}"
@@ -266,13 +238,12 @@ class ApiClient(BaseClient):
         method: AllowedMethods,
         endpoint: str,
         params: dict[str, Any] | None = None,
-        delay: float | None = None,
         as_json: bool = False,
         **kwargs: Any,
     ) -> T:
         def do_request():
             return BaseClient.request(
-                self, method, endpoint, params, delay, as_json, **kwargs
+                self, method, endpoint, params, as_json, **kwargs
             )
 
         try:
