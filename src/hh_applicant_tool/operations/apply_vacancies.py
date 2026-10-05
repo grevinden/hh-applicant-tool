@@ -60,6 +60,57 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__package__)
 
+# Подсказка про инструменты шлюза. Через шлюз с MCP-инструментами модель
+# может сама дозагрузить вакансию, работодателя и резюме по идентификаторам
+# из запроса, поэтому решение не упирается в объём текста, который успела
+# прислать утилита.
+AI_TOOLS_HINT = (
+    "У тебя есть инструменты для дополнительного анализа: по "
+    "идентификаторам из запроса можно дозагрузить вакансию, работодателя "
+    "и резюме целиком. Не ограничивайся только текстом запроса."
+)
+
+# Глубина и размер обхода ответа hh.ru. В ответе на вакансию вложенностей
+# достаточно, а вот список бывает длинным, поэтому элементы режем.
+MAX_ID_DEPTH = 4
+MAX_ID_LIST_ITEMS = 5
+MAX_IDS = 40
+
+
+def collect_ids(
+    data: Any,
+    prefix: str = "",
+    depth: int = 0,
+    out: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Собирает идентификаторы из ответа hh.ru вместе с путями до них.
+
+    {"employer": {"id": "1"}} превращается в {"employer.id": "1"}.
+    Нужен для модели, у которой есть инструменты: по этим id она может
+    дозагрузить то, чего не прислала утилита.
+    """
+    if out is None:
+        out = {}
+    if depth > MAX_ID_DEPTH or len(out) >= MAX_IDS:
+        return out
+
+    if isinstance(data, dict):
+        for key, value in data.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if key == "id" or key.endswith("_id"):
+                if isinstance(value, (str, int)) and not isinstance(
+                    value, bool
+                ):
+                    out[path] = str(value)
+                continue
+            if isinstance(value, (dict, list)):
+                collect_ids(value, path, depth + 1, out)
+    elif isinstance(data, list):
+        for index, item in enumerate(data[:MAX_ID_LIST_ITEMS]):
+            collect_ids(item, f"{prefix}[{index}]", depth + 1, out)
+
+    return out
+
 
 def _playwright_proxy(proxies: dict[str, str] | None) -> dict[str, str] | None:
     """Прокси из requests в формате playwright chromium.launch(proxy=...)."""
@@ -634,6 +685,64 @@ class Operation(BaseOperation):
 
         return "\n".join(parts)
 
+    def _build_ids_context(
+        self,
+        vacancy: dict | None = None,
+        full_vacancy: dict | None = None,
+        resume: dict | None = None,
+    ) -> str:
+        """Все найденные идентификаторы — для дозагрузки инструментами.
+
+        Зачем: через шлюз с MCP-инструментами модель сама дотянет
+        вакансию, работодателя и резюме по этим id. Отдаём всё, что
+        нашли в ответах hh.ru, чтобы анализ меньше зависел от того,
+        сколько данных успела прислать утилита.
+        """
+        short = vacancy or {}
+        source = full_vacancy or short
+        employer = source.get("employer") or short.get("employer") or {}
+        lines: list[str] = []
+
+        vacancy_id = source.get("id") or short.get("id")
+        if vacancy_id:
+            url = (
+                source.get("alternate_url")
+                or short.get("alternate_url")
+                or f"https://hh.ru/vacancy/{vacancy_id}"
+            )
+            lines.append(f"- вакансия: {vacancy_id} ({url})")
+
+        employer_id = employer.get("id")
+        if employer_id:
+            name = employer.get("name")
+            suffix = f" — {name}" if name else ""
+            lines.append(f"- работодатель: {employer_id}{suffix}")
+
+        if resume and resume.get("id"):
+            resume_id = resume["id"]
+            url = resume.get("alternate_url") or (
+                f"https://hh.ru/resume/{resume_id}"
+            )
+            lines.append(f"- резюме: {resume_id} ({url})")
+
+        # Прочие id из ответа: контакты, адреса, вложенные объекты.
+        # Вакансия и работодатель уже перечислены своими строками
+        rest = collect_ids(source)
+        for known in ("id", "employer.id"):
+            rest.pop(known, None)
+        if rest:
+            pairs = ", ".join(f"{key}={value}" for key, value in rest.items())
+            lines.append(f"- прочие id из ответа hh.ru: {pairs}")
+
+        if not lines:
+            return ""
+
+        return (
+            "[ИДЕНТИФИКАТОРЫ ДЛЯ ДОЗАГРУЗКИ]\n"
+            "По ним можно дозагрузить данные инструментами, если "
+            "информации выше не хватает.\n" + "\n".join(lines)
+        )
+
     def _ask_ai_suitability(
         self, prompt: str, vacancy_name: str, log_suffix: str = ""
     ) -> bool:
@@ -719,7 +828,10 @@ class Operation(BaseOperation):
 
     # КТО ЭТО ПРОЧИТАЛ ТОТ ПИД@РАС
     def _is_vacancy_suitable_heavy(
-        self, vacancy: dict, log_suffix: str = "(heavy)"
+        self,
+        vacancy: dict,
+        log_suffix: str = "(heavy)",
+        resume: dict | None = None,
     ) -> bool:
         full_vacancy = None
         if vacancy.get("id"):
@@ -731,6 +843,13 @@ class Operation(BaseOperation):
             include_full=True,
         )
         prompt = f"Вакансия: {vacancy_info}"
+        ids_context = self._build_ids_context(
+            vacancy,
+            full_vacancy=full_vacancy,
+            resume=resume,
+        )
+        if ids_context:
+            prompt = f"{prompt}\n\n{ids_context}"
         return self._ask_ai_suitability(
             prompt, vacancy.get("name", ""), log_suffix
         )
@@ -745,6 +864,8 @@ class Operation(BaseOperation):
     def _build_filter_system_prompt_heavy(self, resume_analysis: str) -> str:
         return f"""
 Определи, подходит ли вакансия кандидату.
+
+{AI_TOOLS_HINT}
 
 Смотри в первую очередь на тип работы (роль), а не на технологии.
 
@@ -1590,6 +1711,7 @@ class Operation(BaseOperation):
                             "(custom)"
                             if self.ai_filter == "custom"
                             else "(heavy)",
+                            resume=resume,
                         )
                     else:
                         is_suitable = self._is_vacancy_suitable_light(vacancy)
@@ -1702,6 +1824,15 @@ class Operation(BaseOperation):
                             + "Почта: "
                             + message_placeholders["email"]
                         )
+                        # Идентификаторы отдаём, чтобы модель через
+                        # инструменты шлюза могла дозагрузить вакансию,
+                        # работодателя и резюме целиком
+                        ids_context = self._build_ids_context(
+                            vacancy=vacancy,
+                            resume=resume,
+                        )
+                        if ids_context:
+                            msg = f"{msg}\n{ids_context}\n{AI_TOOLS_HINT}"
                         ## logger.debug("prompt: %s", msg) ## убираем отладку
                         letter = self.cover_letter_ai.complete(msg)
                     else:
