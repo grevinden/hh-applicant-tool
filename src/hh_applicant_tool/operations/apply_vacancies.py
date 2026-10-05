@@ -842,7 +842,9 @@ class Operation(BaseOperation):
             full_vacancy=full_vacancy,
             include_full=True,
         )
-        prompt = f"Вакансия: {vacancy_info}"
+        # _build_vacancy_context уже начинается с «Вакансия: », свой
+        # префикс тут давал «Вакансия: Вакансия: » в промпте
+        prompt = vacancy_info
         ids_context = self._build_ids_context(
             vacancy,
             full_vacancy=full_vacancy,
@@ -856,7 +858,8 @@ class Operation(BaseOperation):
 
     def _is_vacancy_suitable_light(self, vacancy: dict) -> bool:
         vacancy_info = self._build_vacancy_context(vacancy, include_full=False)
-        prompt = f"Вакансия: {vacancy_info}"
+        # Префикс не добавляем: он уже есть в контексте вакансии
+        prompt = vacancy_info
         return self._ask_ai_suitability(
             prompt, vacancy.get("name", ""), "(light)"
         )

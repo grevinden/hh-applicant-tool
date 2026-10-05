@@ -153,3 +153,39 @@ def test_filter_client_sends_system_prompt_in_openai_payload() -> None:
         {"role": "system", "content": "Only accept Python roles"},
         {"role": "user", "content": "Вакансия: Python developer"},
     ]
+
+
+class TestVacancyPromptPrefix:
+    """Название вакансии не должно дублироваться в промпте."""
+
+    def operation(self) -> Operation:
+        operation = _make_operation()
+        operation.__dict__["api_client"] = MagicMock()
+        operation.api_client.get.return_value = {
+            "id": "1",
+            "name": "Senior Python",
+            "description": "<p>Описание</p>",
+        }
+        operation.vacancy_filter_ai = MagicMock()
+        operation.vacancy_filter_ai.complete.return_value = '{"suitable": true}'
+        return operation
+
+    def test_heavy_prompt_has_single_prefix(self) -> None:
+        """Раньше тут получалось «Вакансия: Вакансия: …»."""
+        operation = self.operation()
+
+        operation._is_vacancy_suitable_heavy({"id": "1", "name": "Senior Python"})
+
+        prompt = operation.vacancy_filter_ai.complete.call_args.args[0]
+        assert "Вакансия: Вакансия" not in prompt
+        assert prompt.startswith("Вакансия: Senior Python")
+        assert "Описание: Описание" in prompt
+
+    def test_light_prompt_has_single_prefix(self) -> None:
+        operation = self.operation()
+
+        operation._is_vacancy_suitable_light({"id": "1", "name": "Senior Python"})
+
+        prompt = operation.vacancy_filter_ai.complete.call_args.args[0]
+        assert "Вакансия: Вакансия" not in prompt
+        assert prompt.startswith("Вакансия: Senior Python")
