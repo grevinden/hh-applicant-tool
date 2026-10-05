@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import random
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -348,7 +347,6 @@ class Operation(BaseOperation):
                     self.api_client.post(
                         f"/negotiations/{nid}/messages",
                         message=send_message,
-                        delay=random.uniform(1, 3),
                     )
                     print(f"📨 Отправлено для {vacancy['alternate_url']}")
 

@@ -3,11 +3,12 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import random
 import time
 from dataclasses import dataclass
 from functools import cached_property
 from threading import Lock
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, Sequence, TypeVar
 from urllib.parse import urlencode, urljoin
 
 import requests
@@ -27,8 +28,15 @@ __all__ = ("ApiClient", "OAuthClient")
 HH_API_URL = "https://api.hh.ru/"
 HH_OAUTH_URL = "https://hh.ru/oauth/"
 DEFAULT_DELAY = 0.345
+# Раньше эта пауза была вшита в три места отправки отклика как
+# random.uniform(1, 3). Теперь величина настраивается здесь и по
+# умолчанию осталась прежней.
+DEFAULT_THROTTLE_MIN = 1.0
+DEFAULT_THROTTLE_MAX = 3.0
 
 AllowedMethods = Literal["GET", "POST", "PUT", "DELETE"]
+# Методы, которые что-то меняют: перед ними и делается случайная пауза
+WRITE_METHODS = ("POST", "PUT", "DELETE")
 T = TypeVar("T")
 
 
@@ -43,11 +51,16 @@ class BaseClient:
     user_agent: str | None = None
     session: Session | None = None
     delay: float | None = None
+    throttle: Sequence[float] | None = None
     _previous_request_time: float = 0.0
 
     def __post_init__(self) -> None:
         assert self.base_url.endswith("/"), "base_url must ends with /"
         self.delay = self.delay or DEFAULT_DELAY
+        if self.throttle is not None:
+            assert len(self.throttle) == 2, "throttle must be [min, max]"
+            assert self.throttle[0] >= 0, "throttle min must be >= 0"
+            assert self.throttle[0] <= self.throttle[1], "throttle min > max"
         self.user_agent = self.user_agent or generate_android_useragent()
 
         # logger.debug(f"user agent: {self.user_agent}")
@@ -91,6 +104,17 @@ class BaseClient:
             ) > 0:
                 logger.debug("wait %fs before request", delay)
                 time.sleep(delay)
+            # Случайная пауза перед изменяющими запросами. Раньше такая
+            # пауза была вшита в три места отправки отклика, и её
+            # величина нигде не была настраиваемой. Теперь она живёт
+            # тут, на транспорте, и настраивается один раз флагом
+            # --throttle: hh не любит частые отклики с одинаковым
+            # интервалом. Только запись: чтение выдачи страниц паузой
+            # не должно тормозить.
+            if self.throttle and method in WRITE_METHODS:
+                pause = random.uniform(*self.throttle)
+                logger.debug("throttle %.2fs before %s", pause, method)
+                time.sleep(pause)
             has_body = method in ["POST", "PUT"]
             payload = {
                 ["data", "json"][as_json] if has_body else "params": params

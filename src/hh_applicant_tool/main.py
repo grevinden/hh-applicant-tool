@@ -26,6 +26,7 @@ import requests
 import urllib3
 
 from . import ai, api, utils
+from .api.client import DEFAULT_THROTTLE_MAX, DEFAULT_THROTTLE_MIN
 from .constants import (
     CONFIG_DIR,
     CONFIG_FILENAME,
@@ -67,6 +68,7 @@ class BaseNamespace(argparse.Namespace):
     config_dir: Path
     verbosity: int
     api_delay: float
+    throttle: list[float] | None
     user_agent: str
     proxy_url: str
     openai_proxy_url: str
@@ -121,6 +123,14 @@ class HHApplicantTool(MegaTool):
             "--delay",
             type=float,
             help="Задержка между запросами к API HH по умолчанию",
+        )
+        parser.add_argument(
+            "--throttle",
+            nargs=2,
+            type=float,
+            metavar=("MIN", "MAX"),
+            default=[DEFAULT_THROTTLE_MIN, DEFAULT_THROTTLE_MAX],
+            help="Случайная пауза перед изменяющими запросами (отклик, сообщение). Задаётся один раз здесь, на транспорте, а не в каждом месте отправки.",
         )
         parser.add_argument(
             "--user-agent",
@@ -315,6 +325,7 @@ class HHApplicantTool(MegaTool):
             refresh_token=token.get("refresh_token"),
             access_expires_at=token.get("access_expires_at"),
             delay=self.api_delay or config.get("api_delay"),
+            throttle=self.throttle or config.get("throttle"),
             user_agent=self.user_agent or config.get("user_agent"),
             session=self.session,
         )

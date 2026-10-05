@@ -1796,7 +1796,6 @@ class Operation(BaseOperation):
                             res = self.api_client.post(
                                 "/negotiations",
                                 params,
-                                delay=random.uniform(1, 3),
                             )
                             assert res == {}
                             applied_count += 1
@@ -1832,7 +1831,6 @@ class Operation(BaseOperation):
                             res = self.api_client.post(
                                 "/negotiations",
                                 params,
-                                delay=random.uniform(1, 3),
                             )
                             assert res == {}
                             applied_count += 1
