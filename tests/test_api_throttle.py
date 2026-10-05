@@ -1,9 +1,10 @@
 """Троплинг запросов к hh.ru живёт на транспорте.
 
-Пауза перед изменяющими запросами раньше была вшита в три места отправки
-отклика как random.uniform(1, 3) — величина нигде не настраивалась и
-легко разъезжалась. Теперь это throttle на ApiClient, и тест проверяет,
-что он один, применяется к записи и не тормозит чтение выдачи.
+Пауза между запросами раньше была вшита в три места отправки отклика как
+random.uniform(1, 3) — величина нигде не настраивалась и легко разъезжалась.
+Теперь это throttle на ApiClient: один настройка на транспорте, перед
+любым запросом без разбора — чтение это или запись. Запросы выстраиваются
+в очередь под self.lock, поэтому пауза выдерживается между соседними.
 
 Сеть не используется: requests.Session заменён заглушкой, sleep
 перехвачен.
@@ -69,13 +70,25 @@ class TestThrottle:
         assert len(slept) == 1
         assert 1.0 <= slept[0] <= 3.0
 
-    def test_get_is_not_throttled(self, slept):
-        """Чтение выдачи не должно тормозиться паузой."""
+    def test_get_is_throttled_too(self, slept):
+        """Чтение выдачи тоже ждёт: очередь одна на все запросы."""
         client = _client(throttle=[1.0, 3.0])
 
         client.get("/vacancies")
 
-        assert slept == []
+        assert len(slept) == 1
+        assert 1.0 <= slept[0] <= 3.0
+
+    def test_queue_is_shared_between_methods(self, slept):
+        """Неважно, что за запросы: пауза выдерживается между ними."""
+        client = _client(throttle=[1.0, 3.0])
+
+        client.get("/vacancies")
+        client.post("/negotiations")
+        client.get("/resumes")
+
+        assert len(slept) == 3
+        assert all(1.0 <= d <= 3.0 for d in slept)
 
     def test_throttle_disabled_by_default(self, slept):
         """Без настройки троплинга нет."""
@@ -94,11 +107,11 @@ class TestThrottle:
         assert slept == [0.0]
 
     def test_pause_differs_between_calls(self, slept):
-        """Два отклика подряд не должны ждать одинаково."""
+        """Два запроса подряд не должны ждать одинаково."""
         client = _client(throttle=[1.0, 3.0])
 
-        client.post("/negotiations")
-        client.post("/negotiations")
+        client.get("/vacancies")
+        client.get("/vacancies")
 
         assert slept[0] != slept[1]
 
