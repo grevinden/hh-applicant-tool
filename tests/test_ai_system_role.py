@@ -180,6 +180,19 @@ class TestFlag:
         args = parser.parse_args(["--developer-role", "apply"])
         assert args.use_developer_role is True
 
+    def test_flag_parses_after_subcommand(self):
+        """Флаг принимается в любом месте командной строки, как
+        --throttle: argparse разбирает команду в отдельном пространстве
+        имён, поэтому в парсере команды нужен SUPPRESS, а не False."""
+        parser = HHApplicantTool()._parser
+        args = parser.parse_args(["apply", "--use-developer-role"])
+        assert args.use_developer_role is True
+
+    def test_flag_before_subcommand_wins_over_stub(self):
+        parser = HHApplicantTool()._parser
+        args = parser.parse_args(["--use-developer-role", "apply"])
+        assert args.use_developer_role is True
+
     def test_defaults_to_system(self):
         parser = HHApplicantTool()._parser
         args = parser.parse_args(["apply"])

@@ -120,6 +120,32 @@ class HHApplicantTool(MegaTool):
             help="Случайная пауза между запросами к HH: MIN и MAX секунд. И API, и логин, и страницы, и капча идут через одну очередь.",
         )
 
+    @staticmethod
+    def _add_developer_role_argument(
+        parser: argparse.ArgumentParser,
+        *,
+        default: Any,
+    ) -> None:
+        """Флаг роли системного промпта.
+
+        В парсерах команд default=SUPPRESS по той же причине, что и у
+        --throttle: значение, указанное до подкоманды, не должно
+        затираться значением из командного пространства имён.
+        """
+        parser.add_argument(
+            "--use-developer-role",
+            "--developer-role",
+            dest="use_developer_role",
+            action="store_true",
+            default=default,
+            help=(
+                "Отправлять системный промпт ролью developer, а не system. "
+                "Нужно, когда запрос идёт через шлюз с агентом: он "
+                "добавляет свой системный промпт, второй system "
+                "отправить нельзя, а developer переопределяет основной"
+            ),
+        )
+
     @classmethod
     def _create_parser(cls) -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(
@@ -182,21 +208,9 @@ class HHApplicantTool(MegaTool):
             type=float,
             help="Таймаут соединения с OpenAI в секундах",
         )
-        parser.add_argument(
-            "--use-developer-role",
-            "--developer-role",
-            dest="use_developer_role",
-            action="store_true",
-            # None, а не False: иначе значение из config.json никогда
-            # не дошло бы до клиента
-            default=None,
-            help=(
-                "Отправлять системный промпт ролью developer, а не system. "
-                "Нужно, когда запрос идёт через шлюз с агентом: он "
-                "добавляет свой системный промпт, второй system "
-                "отправить нельзя, а developer переопределяет основной"
-            ),
-        )
+        # None, а не False: иначе значение из config.json никогда
+        # не дошло бы до клиента
+        cls._add_developer_role_argument(parser, default=None)
         subparsers = parser.add_subparsers(help="commands")
         package_dir = Path(__file__).resolve().parent / OPERATIONS
         for _, module_name, _ in iter_modules([str(package_dir)]):
@@ -213,10 +227,12 @@ class HHApplicantTool(MegaTool):
             )
             op_parser.set_defaults(operation_run=op.run)
             op.setup_parser(op_parser)
-            # Флаг паузы продублирован в командах, чтобы его можно
-            # было писать в любом месте командной строки, а не
-            # только до подкоманды
+            # Флаги продублированы в командах, чтобы их можно было писать
+            # в любом месте командной строки, а не только до подкоманды
             cls._add_throttle_argument(
+                op_parser, default=argparse.SUPPRESS
+            )
+            cls._add_developer_role_argument(
                 op_parser, default=argparse.SUPPRESS
             )
         parser.set_defaults(operation_run=None)
