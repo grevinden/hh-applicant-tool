@@ -79,7 +79,6 @@ class BaseNamespace(argparse.Namespace):
     openai_proxy_url: str
     openai_timeout: float
     openai_connect_timeout: float
-    use_developer_role: bool
     operation_run: Callable[[HHApplicantTool, BaseNamespace], None | int] | None
 
 
@@ -118,32 +117,6 @@ class HHApplicantTool(MegaTool):
             dest="throttle_range",
             default=default,
             help="Случайная пауза между запросами к HH: MIN и MAX секунд. И API, и логин, и страницы, и капча идут через одну очередь.",
-        )
-
-    @staticmethod
-    def _add_developer_role_argument(
-        parser: argparse.ArgumentParser,
-        *,
-        default: Any,
-    ) -> None:
-        """Флаг роли системного промпта.
-
-        В парсерах команд default=SUPPRESS по той же причине, что и у
-        --throttle: значение, указанное до подкоманды, не должно
-        затираться значением из командного пространства имён.
-        """
-        parser.add_argument(
-            "--use-developer-role",
-            "--developer-role",
-            dest="use_developer_role",
-            action="store_true",
-            default=default,
-            help=(
-                "Отправлять системный промпт ролью developer, а не system. "
-                "Нужно, когда запрос идёт через шлюз с агентом: он "
-                "добавляет свой системный промпт, второй system "
-                "отправить нельзя, а developer переопределяет основной"
-            ),
         )
 
     @classmethod
@@ -208,9 +181,6 @@ class HHApplicantTool(MegaTool):
             type=float,
             help="Таймаут соединения с OpenAI в секундах",
         )
-        # None, а не False: иначе значение из config.json никогда
-        # не дошло бы до клиента
-        cls._add_developer_role_argument(parser, default=None)
         subparsers = parser.add_subparsers(help="commands")
         package_dir = Path(__file__).resolve().parent / OPERATIONS
         for _, module_name, _ in iter_modules([str(package_dir)]):
@@ -230,9 +200,6 @@ class HHApplicantTool(MegaTool):
             # Флаги продублированы в командах, чтобы их можно было писать
             # в любом месте командной строки, а не только до подкоманды
             cls._add_throttle_argument(
-                op_parser, default=argparse.SUPPRESS
-            )
-            cls._add_developer_role_argument(
                 op_parser, default=argparse.SUPPRESS
             )
         parser.set_defaults(operation_run=None)
@@ -594,11 +561,14 @@ class HHApplicantTool(MegaTool):
                 )
             )
 
-        # Флаг важнее config.json, но None значит «не задано»: так
-        # значение из конфига доходит до клиента
-        use_developer_role = self.use_developer_role
-        if use_developer_role is None:
-            use_developer_role = bool(c.get("use_developer_role"))
+        # Роль системного промпта задаёт модель в конфиге, а не флаг
+        # запуска: настроенную модель незачем переключать перед
+        # каждым запуском. system — обычное поведение, developer — для
+        # шлюза с агентом, всё остальное — без системного сообщения.
+        # Разрешает значение сам клиент в __post_init__: разрешить его
+        # здесь тоже нельзя, иначе «без системного сообщения» не
+        # отличить от «не задано»
+        system_role = c.get("system_role")
 
         # Заголовки из секции openai и из секции цели дописываются друг к
         # другу, а не заменяют друг друга: иначе openai_captcha молча
@@ -628,11 +598,7 @@ class HHApplicantTool(MegaTool):
             system_prompt=system_prompt,
             base_url=base_url,
             extra_headers=extra_headers or None,
-            system_role=(
-                "developer"
-                if use_developer_role
-                else ai.DEFAULT_SYSTEM_ROLE
-            ),
+            system_role=system_role,
             rate_limit=c.get("rate_limit", 40),
             timeout=(
                 self.openai_timeout

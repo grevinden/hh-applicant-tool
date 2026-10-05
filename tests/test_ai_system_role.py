@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,9 +19,11 @@ import requests
 
 from hh_applicant_tool.ai.openai import (
     DEFAULT_SYSTEM_ROLE,
+    NO_SYSTEM_ROLE,
     SYSTEM_ROLES,
     CAPTCHA_SCRIPT_LATIN,
     ChatOpenAI,
+    resolve_system_role,
 )
 from hh_applicant_tool.main import HHApplicantTool
 
@@ -64,40 +67,71 @@ class TestSystemRoleInPayload:
         assert DEFAULT_SYSTEM_ROLE == "system"
 
     def test_system_role_is_default(self):
-        client, session = _client()
+        client, send = _client()
 
         client.complete("Вакансия: Python developer")
 
-        messages = _sent_messages(session)
+        messages = _sent_messages(send)
         assert messages[0]["role"] == "system"
 
     def test_developer_role_used_when_asked(self):
-        client, session = _client(system_role="developer")
+        client, send = _client(system_role="developer")
 
         client.complete("Вакансия: Python developer")
 
-        messages = _sent_messages(session)
+        messages = _sent_messages(send)
         assert messages[0]["role"] == "developer"
         assert messages[0]["content"] == "Only accept Python roles"
 
     def test_user_message_stays_user(self):
         """Меняется только системный промпт, запрос остаётся запросом."""
-        client, session = _client(system_role="developer")
+        client, send = _client(system_role="developer")
 
         client.complete("Вакансия: Python developer")
 
-        messages = _sent_messages(session)
+        messages = _sent_messages(send)
         assert messages[1] == {
             "role": "user",
             "content": "Вакансия: Python developer",
         }
 
-    def test_unknown_role_rejected(self):
-        with pytest.raises(ValueError, match="роль системного промпта"):
-            _client(system_role="user")
-
     def test_known_roles(self):
         assert SYSTEM_ROLES == ("system", "developer")
+
+
+class TestResolveSystemRole:
+    """Роль приходит из конфига, поэтому лишнее значение не должно
+    ронять прогон."""
+
+    def test_absent_value_defaults_to_system(self):
+        assert resolve_system_role(None) == "system"
+
+    def test_system_and_developer_kept(self):
+        assert resolve_system_role("system") == "system"
+        assert resolve_system_role("developer") == "developer"
+
+    def test_case_and_spaces_ignored(self):
+        assert resolve_system_role(" Developer ") == "developer"
+
+    def test_user_means_no_system_message(self):
+        assert resolve_system_role(NO_SYSTEM_ROLE) is None
+
+    def test_unknown_value_means_no_system_message(self):
+        """Опечатка не должна ронять прогон: запрос уходит без
+        системного сообщения, о значении пишется в лог."""
+        assert resolve_system_role("sistem") is None
+
+    def test_unknown_value_warned(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            resolve_system_role("sistem")
+
+        assert "sistem" in caplog.text
+
+    def test_known_value_not_warned(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            resolve_system_role("developer")
+
+        assert caplog.text == ""
 
 
 class TestCaptchaPayloadRole:
@@ -130,8 +164,6 @@ def _tool(**config) -> HHApplicantTool:
     tool.openai_timeout = None
     tool.openai_connect_timeout = None
     tool.openai_proxy_url = None
-    # Флаг не задан, как при запуске без --use-developer-role
-    tool.use_developer_role = None
     tool.__dict__["config"] = {
         "openai": {
             "api_key": "key",
@@ -147,69 +179,97 @@ class TestToolWiring:
         client = _tool().get_vacancy_filter_ai("prompt")
         assert client.system_role == "system"
 
-    def test_flag_switches_role(self):
-        tool = _tool()
-        tool.use_developer_role = True
-
-        client = tool.get_vacancy_filter_ai("prompt")
-
-        assert client.system_role == "developer"
-
-    def test_config_switches_role(self):
-        client = _tool(use_developer_role=True).get_vacancy_filter_ai("prompt")
-        assert client.system_role == "developer"
-
-    def test_flag_wins_over_config(self):
-        """Флаг важнее config.json: так можно один раз переключиться на
-        другой шлюз, не правя конфиг."""
-        tool = _tool(use_developer_role=True)
-        tool.use_developer_role = False
-
-        client = tool.get_vacancy_filter_ai("prompt")
-
+    def test_config_system_role(self):
+        client = _tool(system_role="system").get_vacancy_filter_ai("prompt")
         assert client.system_role == "system"
+
+    def test_config_developer_role(self):
+        client = _tool(system_role="developer").get_vacancy_filter_ai("prompt")
+        assert client.system_role == "developer"
+
+    def test_config_role_without_system_message(self):
+        """Всё, что не system и не developer, — запрос без системного
+        сообщения."""
+        client = _tool(system_role="user").get_vacancy_filter_ai("prompt")
+        assert client.system_role is None
 
     def test_role_reaches_every_purpose(self):
         """Капча, чат, письмо и фильтр — один и тот же клиент."""
-        tool = _tool()
-        tool.use_developer_role = True
+        tool = _tool(system_role="developer")
 
         assert tool.get_captcha_ai().system_role == "developer"
         assert tool.get_chat_ai("prompt").system_role == "developer"
         assert tool.get_cover_letter_ai("prompt").system_role == "developer"
         assert tool.get_vacancy_filter_ai("prompt").system_role == "developer"
 
-
-class TestFlag:
-    def test_flag_parses(self):
+    def test_no_role_flag_in_parser(self):
+        """Роль задаёт модель в конфиге, а не флаг запуска."""
         parser = HHApplicantTool()._parser
-        args = parser.parse_args(["--use-developer-role", "apply"])
-        assert args.use_developer_role is True
 
-    def test_alias_parses(self):
-        parser = HHApplicantTool()._parser
-        args = parser.parse_args(["--developer-role", "apply"])
-        assert args.use_developer_role is True
+        with pytest.raises(SystemExit):
+            parser.parse_args(["apply", "--use-developer-role"])
 
-    def test_flag_parses_after_subcommand(self):
-        """Флаг принимается в любом месте командной строки, как
-        --throttle: argparse разбирает команду в отдельном пространстве
-        имён, поэтому в парсере команды нужен SUPPRESS, а не False."""
-        parser = HHApplicantTool()._parser
-        args = parser.parse_args(["apply", "--use-developer-role"])
-        assert args.use_developer_role is True
 
-    def test_flag_before_subcommand_wins_over_stub(self):
-        parser = HHApplicantTool()._parser
-        args = parser.parse_args(["--use-developer-role", "apply"])
-        assert args.use_developer_role is True
+class TestNoSystemMessage:
+    def test_system_prompt_not_sent(self):
+        client, send = _client(system_role="user")
 
-    def test_defaults_to_system(self):
-        parser = HHApplicantTool()._parser
-        args = parser.parse_args(["apply"])
-        # Не задано, чтобы дать шанс config.json; system подставит
-        # сам клиент
-        assert args.use_developer_role is None
-        tool = _tool()
-        tool.use_developer_role = args.use_developer_role
-        assert tool.get_vacancy_filter_ai("prompt").system_role == "system"
+        client.complete("Вакансия: Python developer")
+
+        messages = _sent_messages(send)
+        assert [m["role"] for m in messages] == ["user"]
+
+    def test_system_prompt_moves_to_user_message(self):
+        """Промпт без системного сообщения терять нельзя: он уезжает в
+        пользовательское."""
+        client, send = _client(system_role="user")
+
+        client.complete("hi")
+
+        messages = _sent_messages(send)
+        assert len(messages) == 1
+        assert messages[0] == {
+            "role": "user",
+            "content": "Only accept Python roles\n\nhi",
+        }
+
+    def test_message_survives_without_system_prompt(self):
+        """Без промпта склеивать нечего: сообщение уходит как есть."""
+        session = requests.Session()
+        send = MagicMock(return_value=_Response())
+        session.send = send
+        client = ChatOpenAI(
+            api_key="test-key",
+            base_url="https://example.test/v1/chat/completions",
+            model="test-model",
+            system_prompt=None,
+            system_role="user",
+            rate_limit=0,
+            session=session,
+        )
+
+        client.complete("hi")
+
+        assert _sent_messages(send) == [{"role": "user", "content": "hi"}]
+
+    def test_captcha_payload_has_no_system_message(self):
+        client = ChatOpenAI.__new__(ChatOpenAI)
+        client.system_role = None
+
+        payload = client._captcha_payload(
+            "YmFzZTY0", "image/png", 0.7, CAPTCHA_SCRIPT_LATIN
+        )
+
+        assert [m["role"] for m in payload["messages"]] == ["user"]
+
+    def test_captcha_keeps_rules_in_user_text(self):
+        client = ChatOpenAI.__new__(ChatOpenAI)
+        client.system_role = None
+
+        payload = client._captcha_payload(
+            "YmFzZTY0", "image/png", 0.7, CAPTCHA_SCRIPT_LATIN
+        )
+
+        text = payload["messages"][0]["content"][1]["text"]
+        assert client.CAPTCHA_PROMPT_COMMON in text
+        assert client.CAPTCHA_USER_PROMPT[CAPTCHA_SCRIPT_LATIN] in text

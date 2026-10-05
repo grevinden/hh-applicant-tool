@@ -70,7 +70,6 @@ def _tool(**config) -> HHApplicantTool:
     tool.openai_timeout = None
     tool.openai_connect_timeout = None
     tool.openai_proxy_url = None
-    tool.use_developer_role = None
     tool.__dict__["config"] = {
         "openai": {
             "api_key": "key",

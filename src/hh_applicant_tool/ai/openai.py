@@ -71,6 +71,39 @@ _CYRILLIC_LETTER_RE = re.compile(r"[Ѐ-ӿ]")
 # работает через любой шлюз
 SYSTEM_ROLES = ("system", "developer")
 DEFAULT_SYSTEM_ROLE = "system"
+# Настройка, при которой системный промпт не отправляется вовсе: всё
+# уходит одним пользовательским сообщением
+NO_SYSTEM_ROLE = "user"
+
+
+def resolve_system_role(value: object) -> str | None:
+    """Роль системного промпта либо None, если отправлять его не нужно.
+
+    Роль задаёт настройка модели, а не флаг запуска: если модель
+    настроена, её незачем переключать флагом перед каждым запуском.
+
+    Всё, что не system и не developer, означает «без системного
+    сообщения». Неизвестное значение не должно ронять прогон, но и
+    молча превращать опечатку в «нет системного промпта» нельзя,
+    поэтому о нём пишем в лог.
+    """
+    if value is None:
+        return DEFAULT_SYSTEM_ROLE
+
+    role = str(value).strip().lower()
+    if role in SYSTEM_ROLES:
+        return role
+
+    if role != NO_SYSTEM_ROLE:
+        logger.warning(
+            "Неизвестная роль системного промпта %r: системный промпт "
+            "не будет отправлен. Допустимые значения: %s и %s",
+            value,
+            ", ".join(SYSTEM_ROLES),
+            NO_SYSTEM_ROLE,
+        )
+
+    return None
 
 
 def captcha_script(language: str) -> str:
@@ -224,8 +257,9 @@ class ChatOpenAI:
 
     base_url: str
     system_prompt: str | None = None
-    # Роль системного промпта: system или developer (через шлюз)
-    system_role: str = DEFAULT_SYSTEM_ROLE
+    # Роль системного промпта: system, developer (через шлюз) или None,
+    # если системный промпт не отправляется вовсе
+    system_role: str | None = DEFAULT_SYSTEM_ROLE
     # Общий таймаут на весь запрос
     timeout: float = DEFAULT_OPENAI_TIMEOUT
     # Отдельный таймаут только на установку соединения
@@ -262,11 +296,7 @@ class ChatOpenAI:
     _tls: local = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if self.system_role not in SYSTEM_ROLES:
-            raise ValueError(
-                f"Неизвестная роль системного промпта: {self.system_role!r}. "
-                f"Допустимые значения: {list(SYSTEM_ROLES)}"
-            )
+        self.system_role = resolve_system_role(self.system_role)
         self._lock = Lock()
         self._tls = local()
         self.extra_headers = normalize_headers(self.extra_headers)
@@ -372,13 +402,26 @@ class ChatOpenAI:
         """Генерация текста через OpenAI API"""
         messages = []
 
-        # Добавляем системный промпт только если он не пустой и не None
+        user_message = message
+
         if self.system_prompt:
-            messages.append(
-                {"role": self.system_role, "content": self.system_prompt}
-            )
+            if self.system_role:
+                messages.append(
+                    {
+                        "role": self.system_role,
+                        "content": self.system_prompt,
+                    }
+                )
+            else:
+                # Роль None — системного сообщения в запросе не будет.
+                # Промпт при этом не выбрасываем: в нём самые важные
+                # указания, и без него модель не поймёт, чего от неё
+                # ждут. Поэтому он становится началом пользовательского
+                # сообщения
+                user_message = f"{self.system_prompt}\n\n{message}"
+
         # Пользовательское сообщение всегда обязательно
-        messages.append({"role": "user", "content": message})
+        messages.append({"role": "user", "content": user_message})
 
         # Логирование запроса к AI при DEBUG уровне
         if logger.isEnabledFor(logging.DEBUG):
@@ -600,38 +643,46 @@ class ChatOpenAI:
         temperature: float,
         script: str,
     ) -> dict:
+        rules = self.CAPTCHA_PROMPT_COMMON + self.CAPTCHA_PROMPT_RULES[script]
+        user_text = self.CAPTCHA_USER_PROMPT[script]
+
+        messages: list[dict] = []
+        if self.system_role:
+            messages.append({"role": self.system_role, "content": rules})
+        else:
+            # Правила чтения выбрасывать нельзя: без них модель не
+            # знает, чего от неё ждут. Поэтому они становятся частью
+            # пользовательского сообщения — системного сообщения в
+            # запросе не остаётся, а инструкции доходят
+            user_text = f"{rules}\n\n{user_text}"
+
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": (
+                                f"data:{content_type};base64,"
+                                f"{image_base64}"
+                            ),
+                            # мелкие буквы по дуге в режиме по
+                            # умолчанию читаются заметно хуже
+                            "detail": "high",
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": user_text,
+                    },
+                ],
+            }
+        )
+
         return {
             "model": self.model,
-            "messages": [
-                {
-                    "role": self.system_role,
-                    "content": (
-                        self.CAPTCHA_PROMPT_COMMON
-                        + self.CAPTCHA_PROMPT_RULES[script]
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": (
-                                    f"data:{content_type};base64,"
-                                    f"{image_base64}"
-                                ),
-                                # мелкие буквы по дуге в режиме по
-                                # умолчанию читаются заметно хуже
-                                "detail": "high",
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": self.CAPTCHA_USER_PROMPT[script],
-                        },
-                    ],
-                },
-            ],
+            "messages": messages,
             "temperature": temperature,
             # JSON-объект занимает заметно больше, чем голый текст,
             # 20 токенов на {"text": "..."} могло не хватить
