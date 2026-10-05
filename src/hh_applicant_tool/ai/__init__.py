@@ -3,4 +3,5 @@ from .openai import (
     SYSTEM_ROLES,
     ChatOpenAI,
     OpenAIError,
+    normalize_headers,
 )

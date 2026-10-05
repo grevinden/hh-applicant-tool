@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from argparse import ArgumentParser
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+import requests
 
 from hh_applicant_tool.ai.openai import ChatOpenAI
 from hh_applicant_tool.operations.apply_vacancies import Operation
@@ -135,8 +138,9 @@ def test_filter_client_sends_system_prompt_in_openai_payload() -> None:
     When it completes a vacancy suitability request
     Then the outbound messages contain that prompt as the system message
     """
-    session = MagicMock()
-    session.post.return_value = _Response()
+    session = requests.Session()
+    send = MagicMock(return_value=_Response())
+    session.send = send
     client = ChatOpenAI(
         api_key="test-key",
         base_url="https://example.test/v1/chat/completions",
@@ -148,7 +152,8 @@ def test_filter_client_sends_system_prompt_in_openai_payload() -> None:
 
     assert client.complete("Вакансия: Python developer") == "true"
 
-    payload = session.post.call_args.kwargs["json"]
+    prepared = send.call_args.args[0]
+    payload = json.loads(prepared.body)
     assert payload["messages"] == [
         {"role": "system", "content": "Only accept Python roles"},
         {"role": "user", "content": "Вакансия: Python developer"},

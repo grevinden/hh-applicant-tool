@@ -600,6 +600,26 @@ class HHApplicantTool(MegaTool):
         if use_developer_role is None:
             use_developer_role = bool(c.get("use_developer_role"))
 
+        # Заголовки из секции openai и из секции цели дописываются друг к
+        # другу, а не заменяют друг друга: иначе openai_captcha молча
+        # убирала бы общий ключ шлюза. Обычное слияние c выше здесь не
+        # годится — оно перекрывает весь extra_headers.
+        #
+        # Имена не выпиливаются и не перекрываются: заголовки идут
+        # мультисетом, поэтому одноимённые уходят оба, и какой считать
+        # своим решает шлюз. Порядок общий, затем целевой.
+        extra_headers = ai.normalize_headers(
+            self.config.get("openai", {}).get("extra_headers")
+        ) + (
+            ai.normalize_headers(
+                self.config.get(
+                    config_sections[purpose], {}
+                ).get("extra_headers")
+            )
+            if purpose is not None
+            else []
+        )
+
         return ai.ChatOpenAI(
             api_key=api_key,
             model=model,
@@ -607,6 +627,7 @@ class HHApplicantTool(MegaTool):
             max_completion_tokens=c.get("max_completion_tokens", 1000),
             system_prompt=system_prompt,
             base_url=base_url,
+            extra_headers=extra_headers or None,
             system_role=(
                 "developer"
                 if use_developer_role

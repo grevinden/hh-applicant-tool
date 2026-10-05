@@ -14,6 +14,11 @@ from threading import Lock, local
 import requests
 from urllib3.util import Timeout
 
+try:
+    from urllib3 import HTTPHeaderDict
+except ImportError:  # urllib3 1.x
+    from urllib3._collections import HTTPHeaderDict
+
 from ..constants import (
     DEFAULT_CAPTCHA_LANGUAGE,
     DEFAULT_OPENAI_CONNECT_TIMEOUT,
@@ -94,6 +99,72 @@ def _is_retryable(ex: Exception) -> bool:
     return isinstance(ex, _RETRYABLE_EXCEPTIONS)
 
 
+def _header_pairs(headers: object) -> list[tuple[object, object]]:
+    """Сырые пары имя/значение из объекта или списка заголовков."""
+    if headers is None:
+        return []
+
+    if isinstance(headers, dict):
+        pairs: list[tuple[object, object]] = []
+        for name, value in headers.items():
+            # Список значений под одним именем — это несколько
+            # одинаковых заголовков, а не один со списком внутри
+            if isinstance(value, (list, tuple)):
+                pairs.extend((name, item) for item in value)
+            else:
+                pairs.append((name, value))
+
+        return pairs
+
+    if isinstance(headers, (list, tuple)):
+        pairs = []
+        for item in headers:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                raise ValueError(
+                    "extra_headers должен быть объектом "
+                    '{"Имя": "значение"} или списком пар [["Имя", '
+                    '"значение"]], а в списке встретилось: ' + repr(item)
+                )
+            pairs.append((item[0], item[1]))
+
+        return pairs
+
+    raise ValueError(
+        "extra_headers должен быть объектом вида "
+        '{"Имя": "значение"} или списком пар, а получено: '
+        + type(headers).__name__
+    )
+
+
+def normalize_headers(headers: object) -> list[tuple[str, str]]:
+    """Дополнительные заголовки запроса приводятся к списку пар.
+
+    Заголовки в HTTP — мультисет: одно и то же имя может встретиться
+    несколько раз, и получатель сам решает, какое значение взять. Поэтому
+    здесь список пар, а не словарь: повторяющиеся имена должны дойти до
+    запроса отдельными заголовками, иначе один молча затрёт другой.
+
+    Форма в конфиге любая из двух: {"Имя": "значение"} и
+    [["Имя", "значение"]]. В объекте несколько значений под одним именем
+    задаются списком: {"X-Key": ["a", "b"]}.
+
+    Из JSON значения приходят числами, а имена могут оказаться пустыми.
+    Пустое пропускаем: иначе запрос ушёл бы с заголовком без значения.
+    Не-объект — ошибка конфига, и о ней лучше сказать сразу, чем молча
+    проигнорировать все заголовки.
+    """
+    pairs: list[tuple[str, str]] = []
+    for name, value in _header_pairs(headers):
+        if value is None:
+            continue
+        key = str(name).strip()
+        if not key:
+            continue
+        pairs.append((key, str(value)))
+
+    return pairs
+
+
 # Куда складывать картинки капчи для отладки. HH_CAPTCHA_DEBUG_DIR
 # переопределяет каталог, HH_CAPTCHA_DEBUG=0 отключает сохранение.
 CAPTCHA_DEBUG_DIR_ENV = "HH_CAPTCHA_DEBUG_DIR"
@@ -159,6 +230,17 @@ class ChatOpenAI:
     timeout: float = DEFAULT_OPENAI_TIMEOUT
     # Отдельный таймаут только на установку соединения
     connect_timeout: float = DEFAULT_OPENAI_CONNECT_TIMEOUT
+    # Дополнительные заголовки каждого запроса: {"X-Trace": "abc"} либо
+    # [["Имя", "значение"], ...]. Задаются в секции openai конфига и
+    # дополняются в секциях openai_cover_letter, openai_captcha,
+    # openai_chat и openai_vacancy_filter — там можно задать свои
+    # заголовки, не повторяя общие. Нужны, когда запрос идёт через свой
+    # шлюз: чужой ключ, трассировка, маршрутизация.
+    #
+    # Свой Authorization не выпиливается и не перекрывает ключ из
+    # api_key: заголовки идут мультисетом, поэтому до шлюза дойдут оба,
+    # а какой из них считать своим — решает он сам
+    extra_headers: object = None
 
     # Параметры для retry логики
     max_retries: int = 3
@@ -187,6 +269,7 @@ class ChatOpenAI:
             )
         self._lock = Lock()
         self._tls = local()
+        self.extra_headers = normalize_headers(self.extra_headers)
 
     def _thread_session(self) -> requests.Session:
         session = getattr(self._tls, "session", None)
@@ -195,10 +278,38 @@ class ChatOpenAI:
             self._tls.session = session
         return session
 
-    def _default_headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-        }
+    def _send(
+        self,
+        session: requests.Session,
+        payload: dict,
+        timeout: Timeout,
+    ) -> requests.Response:
+        """POST с заголовками-мультисетом.
+
+        Готовить запрос приходится вручную: session.post сводит
+        заголовки в словарь, где имя уникально, и второй заголовок с
+        тем же именем молча затирает первый — а шлюзу может быть нужно
+        увидеть оба. HTTPHeaderDict urllib3 мультизначения не теряет и
+        разворачивает их в отдельные заголовки на проводе.
+        """
+        prepared = session.prepare_request(
+            requests.Request("POST", self.base_url, json=payload)
+        )
+
+        headers = HTTPHeaderDict(prepared.headers)
+        headers.add("Authorization", f"Bearer {self.api_key}")
+        for name, value in self.extra_headers:
+            headers.add(name, value)
+        prepared.headers = headers
+
+        # Прокси, проверку SSL и поток собираем так же, как это делает
+        # session.post: send() сам по себе ничего не подставляет, и
+        # запрос ушёл бы мимо настроек сессии
+        settings = session.merge_environment_settings(
+            prepared.url, {}, None, None, None
+        )
+
+        return session.send(prepared, timeout=timeout, **settings)
 
     @property
     def _min_request_interval(self) -> float:
@@ -213,15 +324,11 @@ class ChatOpenAI:
         голосование по капче, где несколько одинаковых запросов идут
         одновременно и ждать их по очереди бессмысленно.
         """
+        # Ожидание ответа урезается на время, потраченное на соединение
+        timeout = Timeout(connect=self.connect_timeout, total=self.timeout)
+
         if not throttle:
-            return self._thread_session().post(
-                self.base_url,
-                json=payload,
-                headers=self._default_headers(),
-                timeout=Timeout(
-                    connect=self.connect_timeout, total=self.timeout
-                ),
-            )
+            return self._send(self._thread_session(), payload, timeout)
 
         with self._lock:
             if self._previous_request_time > 0:
@@ -235,16 +342,7 @@ class ChatOpenAI:
                     time.sleep(delay)
 
             try:
-                return self.session.post(
-                    self.base_url,
-                    json=payload,
-                    headers=self._default_headers(),
-                    # Ожидание ответа урезается на время, потраченное
-                    # на соединение
-                    timeout=Timeout(
-                        connect=self.connect_timeout, total=self.timeout
-                    ),
-                )
+                return self._send(self.session, payload, timeout)
             finally:
                 self._previous_request_time = time.monotonic()
 

@@ -10,9 +10,11 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
 from hh_applicant_tool.ai.openai import (
     DEFAULT_SYSTEM_ROLE,
@@ -34,8 +36,11 @@ class _Response:
 
 
 def _client(**kwargs) -> tuple[ChatOpenAI, MagicMock]:
-    session = MagicMock()
-    session.post.return_value = _Response()
+    # Сессия настоящая: подготовку запроса делает она сама, и тело
+    # собирается в байты, а мок вернул бы вместо тела заглушку
+    session = requests.Session()
+    send = MagicMock(return_value=_Response())
+    session.send = send
     client = ChatOpenAI(
         api_key="test-key",
         base_url="https://example.test/v1/chat/completions",
@@ -45,7 +50,13 @@ def _client(**kwargs) -> tuple[ChatOpenAI, MagicMock]:
         session=session,
         **kwargs,
     )
-    return client, session
+    return client, send
+
+
+def _sent_messages(send: MagicMock) -> list[dict]:
+    """Сообщения из тела отправленного запроса."""
+    prepared = send.call_args.args[0]
+    return json.loads(prepared.body)["messages"]
 
 
 class TestSystemRoleInPayload:
@@ -57,7 +68,7 @@ class TestSystemRoleInPayload:
 
         client.complete("Вакансия: Python developer")
 
-        messages = session.post.call_args.kwargs["json"]["messages"]
+        messages = _sent_messages(session)
         assert messages[0]["role"] == "system"
 
     def test_developer_role_used_when_asked(self):
@@ -65,7 +76,7 @@ class TestSystemRoleInPayload:
 
         client.complete("Вакансия: Python developer")
 
-        messages = session.post.call_args.kwargs["json"]["messages"]
+        messages = _sent_messages(session)
         assert messages[0]["role"] == "developer"
         assert messages[0]["content"] == "Only accept Python roles"
 
@@ -75,7 +86,7 @@ class TestSystemRoleInPayload:
 
         client.complete("Вакансия: Python developer")
 
-        messages = session.post.call_args.kwargs["json"]["messages"]
+        messages = _sent_messages(session)
         assert messages[1] == {
             "role": "user",
             "content": "Вакансия: Python developer",
