@@ -327,6 +327,62 @@ class TestApiClientUsesQueue:
         assert client.session.throttle is throttle  # type: ignore[union-attr]
 
 
+class TestThrottleFlagPosition:
+    """Флаг паузы должен приниматься в любом месте командной строки.
+
+    Иначе приходится вспоминать, что глобальные флаги argparse идут
+    до подкоманды, а --throttle в конце списка выглядит совершенно
+    обычным флагом команды.
+    """
+
+    @pytest.mark.parametrize(
+        ("argv", "expected"),
+        [
+            (["apply"], [1.0, 3.0]),
+            (["--throttle", "5", "9", "apply"], [5.0, 9.0]),
+            (["apply", "--throttle", "0.5", "1"], [0.5, 1.0]),
+            (["-v", "apply", "-f", "--throttle", "0.5", "1"], [0.5, 1.0]),
+            (["auth", "--throttle", "7", "8"], [7.0, 8.0]),
+        ],
+    )
+    def test_parsed_in_any_position(self, argv, expected):
+        from hh_applicant_tool.main import HHApplicantTool
+
+        parser = HHApplicantTool()._parser
+        args = parser.parse_args(argv)
+
+        assert args.throttle_range == expected
+
+    def test_after_subcommand_wins(self):
+        """Указанная после подкоманды пауза побеждает.
+
+        Разбор команды в argparse копирует значения подпарсера в
+        общее пространство имён, поэтому флаг после подкоманды
+        затирает указанный до неё.
+        """
+        from hh_applicant_tool.main import HHApplicantTool
+
+        parser = HHApplicantTool()._parser
+        args = parser.parse_args(
+            ["--throttle", "5", "9", "apply", "--throttle", "0.5", "1"]
+        )
+
+        assert args.throttle_range == [0.5, 1.0]
+
+    def test_value_before_subcommand_survives(self):
+        """Значение до подкоманды не должно затираться пустым.
+
+        Регрессия: если бы у флага в парсере команды стоял обычный
+        default, подпарсер записал бы его поверх разобранного раньше.
+        """
+        from hh_applicant_tool.main import HHApplicantTool
+
+        parser = HHApplicantTool()._parser
+        args = parser.parse_args(["--throttle", "5", "9", "apply"])
+
+        assert args.throttle_range == [5.0, 9.0]
+
+
 class TestToolWiring:
     def _tool(self, *argv: str):
         from hh_applicant_tool.main import HHApplicantTool

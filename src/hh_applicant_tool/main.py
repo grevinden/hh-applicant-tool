@@ -96,6 +96,29 @@ class HHApplicantTool(MegaTool):
     ):
         pass
 
+    @staticmethod
+    def _add_throttle_argument(
+        parser: argparse.ArgumentParser,
+        *,
+        default: Any,
+    ) -> None:
+        """Флаг случайной паузы между запросами к HH.
+
+        В парсерах команд default=SUPPRESS, а не значение: argparse
+        разбирает команду в отдельном пространстве имён и копирует
+        оттуда все ключи в общее, так что обычный default затирал бы
+        паузу, указанную до подкоманды.
+        """
+        parser.add_argument(
+            "--throttle",
+            nargs=2,
+            type=float,
+            metavar=("MIN", "MAX"),
+            dest="throttle_range",
+            default=default,
+            help="Случайная пауза между запросами к HH: MIN и MAX секунд. И API, и логин, и страницы, и капча идут через одну очередь.",
+        )
+
     @classmethod
     def _create_parser(cls) -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(
@@ -129,14 +152,8 @@ class HHApplicantTool(MegaTool):
             type=float,
             help="Задержка между запросами к API HH по умолчанию",
         )
-        parser.add_argument(
-            "--throttle",
-            nargs=2,
-            type=float,
-            metavar=("MIN", "MAX"),
-            dest="throttle_range",
-            default=[DEFAULT_THROTTLE_MIN, DEFAULT_THROTTLE_MAX],
-            help="Случайная пауза между запросами к HH. Задаётся один раз здесь: и API, и логин, и страницы, и капча идут через одну очередь.",
+        cls._add_throttle_argument(
+            parser, default=[DEFAULT_THROTTLE_MIN, DEFAULT_THROTTLE_MAX]
         )
         parser.add_argument(
             "--user-agent",
@@ -180,6 +197,12 @@ class HHApplicantTool(MegaTool):
             )
             op_parser.set_defaults(operation_run=op.run)
             op.setup_parser(op_parser)
+            # Флаг паузы продублирован в командах, чтобы его можно
+            # было писать в любом месте командной строки, а не
+            # только до подкоманды
+            cls._add_throttle_argument(
+                op_parser, default=argparse.SUPPRESS
+            )
         parser.set_defaults(operation_run=None)
         return parser
 
