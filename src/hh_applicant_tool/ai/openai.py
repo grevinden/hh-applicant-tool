@@ -548,6 +548,71 @@ class ChatOpenAI:
 
         return captcha_text
 
+    # Структурированный ответ на вопрос отборочного теста. Как и в капче,
+    # модель обязана вернуть JSON: свободный текст не годится, потому что
+    # вместо ответа приходит «я не уверен, потому что…», и разобрать
+    # такой ответ нечем. Пустой ответ — это осознанный отказ, его
+    # разбираем в None.
+    TEST_PROMPT_COMMON = (
+        "You answer questions from a job application screening test on hh.ru. "
+        "Answer with a JSON object only, of the form "
+        '{"answer": "..."} , with exactly this one key, no explanation and '
+        "no other keys. "
+        "If you do not know the answer or the information is not enough, "
+        "answer with an empty string: {\"answer\": \"\"}. An empty answer is "
+        "normal and expected in that case. Do not explain why you are "
+        "unsure, do not apologise and do not add any text outside the JSON."
+    )
+
+    @staticmethod
+    def _parse_test_json(raw: str) -> str | None:
+        """Достаёт ответ на вопрос теста из JSON-ответа модели.
+
+        None означает «модель осознанно не ответила»: пустая строка
+        в JSON. Такой вакансию пропускать нужно, но это не ошибка
+        формата — в отличие от не-JSON или JSON без нужного поля,
+        которые означают, что модель не поняла задание.
+
+        Терпимо выкидываем слова вокруг JSON: модель часто пишет
+        «Вот ответ: {...}».
+        """
+        text = (raw or "").strip()
+
+        start = text.find("{")
+        end = text.rfind("}")
+        data = None
+        if start != -1 and end > start:
+            try:
+                data = json.loads(text[start : end + 1])
+            except ValueError as ex:
+                raise OpenAIError(
+                    f"Модель вернула не-JSON: {text[:200]}"
+                ) from ex
+
+        if not isinstance(data, dict):
+            raise OpenAIError(f"Модель вернула не-JSON: {text[:200]}")
+
+        answer = data.get("answer")
+
+        if not isinstance(answer, str):
+            raise OpenAIError(
+                "В JSON нет поля answer: %s" % text[:200]
+            )
+
+        answer = answer.strip()
+
+        return answer or None
+
+    def answer_test_question(self, prompt: str) -> str | None:
+        """Один вопрос теста. None — модель не ответила.
+
+        Метод на клиенте, а не разбор ответа в операции: разбор
+        одинаков для обоих клиентов (шлюз и OpenAI), а операции
+        незачем знать про формат JSON.
+        """
+        raw = self.complete(f"{prompt}\n\n{self.TEST_PROMPT_COMMON}")
+        return self._parse_test_json(raw)
+
     # Промпт капчи hh.ru. Общая часть собрана по живым картинкам
     # 2026-10-03: слова ложатся по дуге, из-за чего модель дорисовывает
     # обрезанные слова до знакомых ("альп" вместо "альянс").

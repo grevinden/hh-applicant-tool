@@ -52,7 +52,7 @@ TESTS_DATA = {
 }
 
 
-def make_operation(answer: str = "10") -> Operation:
+def make_operation(answer: str | None = "10") -> Operation:
     operation = Operation()
     operation._args = SimpleNamespace()
     operation.tool = MagicMock()
@@ -60,7 +60,7 @@ def make_operation(answer: str = "10") -> Operation:
     operation._get_vacancy_tests = lambda response_url: TESTS_DATA
     operation.cover_letter_ai = MagicMock()
     operation.test_ai = MagicMock()
-    operation.test_ai.complete.return_value = answer
+    operation.test_ai.answer_test_question.return_value = answer
     operation.tool.session.post.return_value = MagicMock(
         json=lambda: {"success": "true"}
     )
@@ -92,7 +92,7 @@ class TestChoiceQuestion:
             resume=RESUME,
         )
 
-        assert operation.test_ai.complete.call_count == 1
+        assert operation.test_ai.answer_test_question.call_count == 1
         operation.cover_letter_ai.complete.assert_not_called()
 
     def test_ids_are_passed_to_the_model(self):
@@ -105,13 +105,13 @@ class TestChoiceQuestion:
             resume=RESUME,
         )
 
-        prompt = operation.test_ai.complete.call_args.args[0]
+        prompt = operation.test_ai.answer_test_question.call_args.args[0]
         assert "https://hh.ru/vacancy/111" in prompt
         assert "резюме: resume-1" in prompt
 
     def test_empty_answer_skips_vacancy(self):
         """Неуверенность — повод не отвечать, а не гадать."""
-        operation = make_operation("")
+        operation = make_operation(None)
 
         with pytest.raises(UnansweredTest):
             operation._solve_vacancy_test(
@@ -125,7 +125,7 @@ class TestChoiceQuestion:
 
     def test_no_variant_id_skips_vacancy(self):
         """Первый вариант из списка — это заведомо неверный ответ."""
-        operation = make_operation("не знаю")
+        operation = make_operation(None)
 
         with pytest.raises(UnansweredTest):
             operation._solve_vacancy_test(
@@ -147,9 +147,9 @@ class TestChoiceQuestion:
             resume=RESUME,
         )
 
-        prompt = operation.test_ai.complete.call_args.args[0]
+        prompt = operation.test_ai.answer_test_question.call_args.args[0]
         assert TEST_CHOICE_PROMPT in prompt
-        assert "пустой ответ" in prompt
+        assert "answer" in prompt
 
 
 @pytest.fixture
@@ -190,7 +190,7 @@ class TestTextQuestion:
 
     def test_empty_text_answer_skips_vacancy(self, with_tasks):
         with_tasks([{"id": 2, "description": "Расскажите о себе"}])
-        operation = make_operation("")
+        operation = make_operation(None)
 
         with pytest.raises(UnansweredTest):
             operation._solve_vacancy_test(
