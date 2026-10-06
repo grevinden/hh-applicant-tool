@@ -72,46 +72,16 @@ AI_TOOLS_HINT = (
     "и резюме целиком. Не ограничивайся только текстом запроса."
 )
 
-# Глубина и размер обхода ответа hh.ru. В ответе на вакансию вложенностей
-# достаточно, а вот список бывает длинным, поэтому элементы режем.
-MAX_ID_DEPTH = 4
-MAX_ID_LIST_ITEMS = 5
-MAX_IDS = 40
+# Правило для сомнений. Ложь в сопроводительном письме хуже, чем
+# отсутствие письма: ответ «не уверен» выгоднее, чем выдуманный
+# опыт или навыки, которых у соискателя нет
+UNCERTAIN_ANSWER_RULE = (
+    "Если ты не уверен в ответе или в информации не хватает — верни "
+    "пустой ответ, не выдумывая ничего. Пустой ответ лучше, чем "
+    "правдоподобная выдумка."
+)
 
 
-def collect_ids(
-    data: Any,
-    prefix: str = "",
-    depth: int = 0,
-    out: dict[str, str] | None = None,
-) -> dict[str, str]:
-    """Собирает идентификаторы из ответа hh.ru вместе с путями до них.
-
-    {"employer": {"id": "1"}} превращается в {"employer.id": "1"}.
-    Нужен для модели, у которой есть инструменты: по этим id она может
-    дозагрузить то, чего не прислала утилита.
-    """
-    if out is None:
-        out = {}
-    if depth > MAX_ID_DEPTH or len(out) >= MAX_IDS:
-        return out
-
-    if isinstance(data, dict):
-        for key, value in data.items():
-            path = f"{prefix}.{key}" if prefix else str(key)
-            if key == "id" or key.endswith("_id"):
-                if isinstance(value, (str, int)) and not isinstance(
-                    value, bool
-                ):
-                    out[path] = str(value)
-                continue
-            if isinstance(value, (dict, list)):
-                collect_ids(value, path, depth + 1, out)
-    elif isinstance(data, list):
-        for index, item in enumerate(data[:MAX_ID_LIST_ITEMS]):
-            collect_ids(item, f"{prefix}[{index}]", depth + 1, out)
-
-    return out
 
 
 def _playwright_proxy(proxies: dict[str, str] | None) -> dict[str, str] | None:
@@ -693,12 +663,17 @@ class Operation(BaseOperation):
         full_vacancy: dict | None = None,
         resume: dict | None = None,
     ) -> str:
-        """Все найденные идентификаторы — для дозагрузки инструментами.
+        """Ссылки и идентификаторы — для дозагрузки инструментами шлюза.
 
         Зачем: через шлюз с MCP-инструментами модель сама дотянет
-        вакансию, работодателя и резюме по этим id. Отдаём всё, что
-        нашли в ответах hh.ru, чтобы анализ меньше зависел от того,
-        сколько данных успела прислать утилита.
+        вакансию, работодателя и резюме по этим данным. Тогда анализ
+        меньше зависит от того, сколько текста успела прислать утилита.
+
+        Формат подбирали под то, чем реально пользуется шлюз: вакансию
+        и работодателя удобнее грузить по ссылке, а резюме — по
+        идентификатору, ссылка на него бесполезна. Остальные
+        идентификаторы из ответа hh.ru не отдаём: в практическом
+        запуске они только захламляли запрос и путали модель.
         """
         short = vacancy or {}
         source = full_vacancy or short
@@ -712,37 +687,31 @@ class Operation(BaseOperation):
                 or short.get("alternate_url")
                 or f"https://hh.ru/vacancy/{vacancy_id}"
             )
-            lines.append(f"- вакансия: {vacancy_id} ({url})")
+            lines.append(f"- вакансия: {url}")
 
         employer_id = employer.get("id")
         if employer_id:
+            url = employer.get("alternate_url") or (
+                f"https://hh.ru/employer/{employer_id}"
+            )
             name = employer.get("name")
             suffix = f" — {name}" if name else ""
-            lines.append(f"- работодатель: {employer_id}{suffix}")
+            lines.append(f"- работодатель: {url}{suffix}")
 
         if resume and resume.get("id"):
-            resume_id = resume["id"]
-            url = resume.get("alternate_url") or (
-                f"https://hh.ru/resume/{resume_id}"
-            )
-            lines.append(f"- резюме: {resume_id} ({url})")
-
-        # Прочие id из ответа: контакты, адреса, вложенные объекты.
-        # Вакансия и работодатель уже перечислены своими строками
-        rest = collect_ids(source)
-        for known in ("id", "employer.id"):
-            rest.pop(known, None)
-        if rest:
-            pairs = ", ".join(f"{key}={value}" for key, value in rest.items())
-            lines.append(f"- прочие id из ответа hh.ru: {pairs}")
+            lines.append(f"- резюме: {resume['id']}")
 
         if not lines:
             return ""
 
         return (
-            "[ИДЕНТИФИКАТОРЫ ДЛЯ ДОЗАГРУЗКИ]\n"
-            "По ним можно дозагрузить данные инструментами, если "
-            "информации выше не хватает.\n" + "\n".join(lines)
+            "[ДАННЫЕ ДЛЯ ДОЗАГРУЗКИ]\n"
+            "Вакансию, работодателя и резюме можно дозагрузить "
+            "инструментами по этим ссылкам и идентификатору, если "
+            "информации выше не хватает.\n"
+            + "\n".join(lines)
+            + "\n"
+            + UNCERTAIN_ANSWER_RULE
         )
 
     def _ask_ai_suitability(
@@ -1807,13 +1776,15 @@ class Operation(BaseOperation):
                             + message_placeholders["employer_name"]
                             + "; "
                         )
+                        # Ссылка на резюме модели бесполезна: инструменты
+                        # шлюза грузят резюме по идентификатору
                         msg += (
                             "[РЕЗЮМЕ] "
                             + "Название: "
                             + message_placeholders["resume_title"]
                             + ", "
-                            + "Ссылка на резюме: "
-                            + message_placeholders["resume_url"]
+                            + "Идентификатор: "
+                            + message_placeholders["resume_hash"]
                             + ", "
                         )
                         msg += (
