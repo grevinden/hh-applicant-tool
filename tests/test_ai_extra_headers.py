@@ -307,6 +307,38 @@ class TestConfigWiring:
         assert tool.get_vacancy_filter_ai("p").extra_headers == [
             ("X-Trace", "abc")
         ]
+        assert tool.get_test_ai().extra_headers == [("X-Trace", "abc")]
+
+    def test_test_falls_back_to_cover_letter(self):
+        """Пока раздела openai_test нет, тесты ходят туда же, куда письма:
+        заводить новый адрес шлюза ради ответов на тест незачем."""
+        tool = _tool(
+            openai_cover_letter={
+                "model": "letter-model",
+                "extra_headers": {"X-Goal": "letter"},
+            }
+        )
+
+        client = tool.get_test_ai()
+
+        assert client.model == "letter-model"
+        assert client.extra_headers == [("X-Goal", "letter")]
+
+    def test_own_section_wins_over_fallback(self):
+        tool = _tool(
+            openai_cover_letter={"model": "letter-model"},
+            openai_test={"model": "test-model"},
+        )
+
+        assert tool.get_test_ai().model == "test-model"
+
+    def test_test_prompt_is_not_the_letter_prompt(self):
+        """Главная причина отдельного клиента: промпт письма в тесте сбивает."""
+        tool = _tool()
+
+        assert tool.get_test_ai().system_prompt != tool.get_cover_letter_ai(
+            "пиши письмо"
+        ).system_prompt
 
     def test_purpose_adds_to_common(self):
         """Заголовки секции цели дописываются к общим, а не заменяют их:

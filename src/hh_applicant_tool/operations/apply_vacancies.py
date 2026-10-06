@@ -58,6 +58,16 @@ if TYPE_CHECKING:
     from ..main import HHApplicantTool
 
 
+class UnansweredTest(ValueError):
+    """Модель не смогла ответить на вопрос теста.
+
+    Наследник ValueError, потому что вызывающий код уже ловит
+    ValueError вокруг решения теста. Отдельный тип нужен, чтобы
+    отличить «не знаю, что ответить» от прочих ошибок теста: это не
+    сбой, а осознанный отказ от вакансии.
+    """
+
+
 logger = logging.getLogger(__package__)
 
 # Подсказка про инструменты шлюза. Через шлюз с MCP-инструментами модель
@@ -79,6 +89,17 @@ UNCERTAIN_ANSWER_RULE = (
     "Если ты не уверен в ответе или в информации не хватает — верни "
     "пустой ответ, не выдумывая ничего. Пустой ответ лучше, чем "
     "правдоподобная выдумка."
+)
+
+# Ответ на вопрос с вариантами. Правило выше («при неуверенности
+# пустой ответ») тут действует буквально: если модель не выбрала
+# вариант, значит, отвечать не на чем. Подставлять вместо неё первый
+# вариант из списка нельзя — это отправленный от имени соискателя
+# заведомо неверный ответ.
+TEST_CHOICE_PROMPT = (
+    "Вопрос с вариантами: выбери ID наиболее подходящего ответа и "
+    "пришли только этот ID. Если ни один вариант не подходит — не "
+    "отвечай вовсе, верни пустой ответ."
 )
 
 
@@ -534,6 +555,10 @@ class Operation(BaseOperation):
             if args.use_ai
             else None
         )
+        # Тесты — отдельный клиент со своим промптом. Раньше вопросы
+        # теста уходили в cover_letter_ai, и модель, решая тест,
+        # получала промпт сопроводительного письма.
+        self.test_ai = tool.get_test_ai() if args.use_ai else None
         self.ai_filter = args.ai_filter
         self.ai_filter_prompt = args.ai_filter_prompt
         self.vacancy_filter_ai = None
@@ -1839,6 +1864,8 @@ class Operation(BaseOperation):
                                 vacancy_id=vacancy["id"],
                                 resume_hash=resume["id"],
                                 letter=letter,
+                                vacancy=vacancy,
+                                resume=resume,
                             )
                             test_handled = True
                             if result.get("success") == "true":
@@ -1876,6 +1903,16 @@ class Operation(BaseOperation):
                                     )
                         else:
                             test_handled = True
+                    except UnansweredTest as ex:
+                        # Модель не уверена в ответе — вакансию
+                        # пропускаем. Это не ошибка, и отклик вслепую
+                        # здесь хуже, чем никакого отклика
+                        logger.info(
+                            "Пропускаем вакансию с тестом: %s (%s)",
+                            vacancy["alternate_url"],
+                            ex,
+                        )
+                        continue
                     except ValueError as ex:
                         if str(ex) == "tests not found.":
                             logger.warning(
@@ -2032,6 +2069,8 @@ class Operation(BaseOperation):
         vacancy_id: str | int,
         resume_hash: str,
         letter: str = "",
+        vacancy: dict | None = None,
+        resume: dict | None = None,
     ) -> dict[str, Any]:
         """Загружает тест, ждет паузу и отправляет отклик."""
         response_url = f"https://hh.ru/applicant/vacancy_response?vacancyId={vacancy_id}&startedWithQuestion=false&hhtmFrom=vacancy"
@@ -2063,13 +2102,18 @@ class Operation(BaseOperation):
             "letter": letter,
         }
 
+        # Ссылку на вакансию и id резюме отдаём и здесь: вопрос теста
+        # часто про саму вакансию или про опыт из резюме, а текста
+        # выше у модели нет
+        ids_context = self._build_ids_context(vacancy=vacancy, resume=resume)
+
         for task in test_data["tasks"]:
             field_name = f"task_{task['id']}"
             solutions = task.get("candidateSolutions") or []
             question = (task.get("description") or "").strip()
 
             if solutions:
-                if self.cover_letter_ai:
+                if self.test_ai:
                     options = "\n".join(
                         [
                             f"{s['id']}: {strip_tags(s['text'])}"
@@ -2079,15 +2123,23 @@ class Operation(BaseOperation):
                     prompt = (
                         f"Вопрос: {question}\n"
                         f"Варианты:\n{options}\n"
-                        f"Выбери ID правильного ответа. Пришли только ID."
+                        f"{TEST_CHOICE_PROMPT}"
                     )
-                    ai_answer = self.cover_letter_ai.complete(prompt).strip()
-                    # Ищем ID в ответе AI на случай лишнего текста
+                    if ids_context:
+                        prompt = f"{prompt}\n{ids_context}"
+                    ai_answer = self.test_ai.complete(prompt).strip()
+                    # Ищем ID в ответе AI на случай лишнего текста.
+                    # Нет цифр — модель не выбрала вариант. Подставлять
+                    # вместо неё первый вариант нельзя: это заведомо
+                    # неверный ответ от имени соискателя, поэтому
+                    # вакансию пропускаем целиком
                     match = re.search(r"\d+", ai_answer)
-                    selected_id = (
-                        match.group(0) if match else solutions[0]["id"]
-                    )
-                    payload[field_name] = selected_id
+                    if match is None:
+                        raise UnansweredTest(
+                            f"AI не выбрал вариант ответа на вопрос "
+                            f"{task['id']} теста вакансии {vacancy_id}"
+                        )
+                    payload[field_name] = match.group(0)
                 else:
                     yes_solution = next(
                         filter(lambda x: x["text"].lower() == "да", solutions),
@@ -2112,11 +2164,22 @@ class Operation(BaseOperation):
                     answer = rand_text(
                         "{{Простите|Извините}, но я не перехожу по {внешним|сторонним} ссылкам, так как {опасаюсь взлома|не хочу {быть взломанным|подхватить вирус|чтобы у меня {со|с банковского} счета украли деньги}}.|У меня нет времени на заполнение анкет и гуглодоков}"
                     )
-                elif self.cover_letter_ai:
+                elif self.test_ai:
                     prompt = f"Дай краткий и профессиональный ответ на вопрос: {question}"
-                    answer = self.cover_letter_ai.complete(prompt)
+                    if ids_context:
+                        prompt = f"{prompt}\n{ids_context}"
+                    answer = self.test_ai.complete(prompt)
                     ## добавляем ответ AI на вопрос теста##
                     logger.debug("AI ответ= %r", answer)
+                    # Пустой ответ — модель не знает, что написать.
+                    # Вакансию пропускаем, а не отправляем ответ
+                    # вслепую: пустая анкета выглядит хуже, чем
+                    # отсутствие отклика
+                    if not answer.strip():
+                        raise UnansweredTest(
+                            f"AI не ответил на вопрос {task['id']} теста "
+                            f"вакансии {vacancy_id}"
+                        )
                 # Тупоеблые любят вопросы с ответами да/нет, где ответ да является правильным в большинстве случаев.
                 else:
                     answer = "Да"

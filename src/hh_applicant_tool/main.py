@@ -498,6 +498,21 @@ class HHApplicantTool(MegaTool):
     def get_chat_ai(self, system_prompt: str) -> ai.ChatOpenAI:
         return self.get_ai_client(system_prompt, purpose="chat")
 
+    def get_test_ai(self) -> ai.ChatOpenAI:
+        # Промпт тут свой: вопросы отборочного теста — не сопроводительное
+        # письмо, и промпт письма модель только сбивает. Раньше тестовые
+        # вопросы уходили тем же клиентом, что и письмо, поэтому модель
+        # писала письмо там, где от неё ждали «да» или номер варианта.
+        return self.get_ai_client(
+            system_prompt=(
+                "Ты отвечаешь на вопросы отборочного теста вакансии на hh.ru. "
+                "Отвечай кратко, по делу и на языке вопроса, без вступлений "
+                "и без рассуждений вслух. Ничего не выдумывай о соискателе: "
+                "если данных не хватает, ответь нейтрально и обтекаемо."
+            ),
+            purpose="test",
+        )
+
     def get_captcha_ai(self) -> ai.ChatOpenAI:
         # Промпт тут короткий и общий: точный промпт распознавания
         # задаёт solve_captcha, он же требует JSON с двумя словами
@@ -520,7 +535,14 @@ class HHApplicantTool(MegaTool):
             "vacancy_filter": "openai_vacancy_filter",
             "captcha": "openai_captcha",
             "chat": "openai_chat",
+            "test": "openai_test",
         }
+
+        # Отдельный раздел для тестов заводить необязательно: пока его
+        # нет, вопросы теста ходят туда же, куда письма, но со своим
+        # промптом. Так не появляется новый адрес шлюза, который надо
+        # ещё прописать, чтобы просто ответить на тест.
+        fallback_purposes = {"test": "cover_letter"}
 
         c = self.config.get("openai", {})
 
@@ -530,6 +552,9 @@ class HHApplicantTool(MegaTool):
                     f"Неизвестная цель AI: {purpose}. "
                     f"Допустимые значения: {list(config_sections.keys())}"
                 )
+
+            if not self.config.get(config_sections[purpose], {}):
+                purpose = fallback_purposes.get(purpose, purpose)
 
             purpose_config = self.config.get(config_sections[purpose], {})
             # Переписываем значения openai
