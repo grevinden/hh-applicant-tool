@@ -25,7 +25,7 @@ from hh_applicant_tool.ai.openai import (
     ChatOpenAI,
     resolve_system_role,
 )
-from hh_applicant_tool.main import HHApplicantTool
+from hh_applicant_tool.tool import HHApplicantTool
 
 
 class _Response:

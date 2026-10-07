@@ -485,6 +485,22 @@ class ChatOpenAI:
 
         raise OpenAIError("OpenAI request failed after retries")
 
+    def recognize_text(
+        self,
+        image_data: bytes,
+        *,
+        language: str = DEFAULT_CAPTCHA_LANGUAGE,
+    ) -> str:
+        """Прочитать картинку и вернуть одну строку текста.
+
+        Единственная точка входа для того, кому нужна строка, а не
+        решение: страница капчи при логине и ручной фолбэк в tool.py.
+        Правилами чтения (алфавит, JSON, повторы) управляет наш
+        `_captcha_payload`, а не зовущий код: наивная просьба «распознай
+        текст» возвращает и мусор, и лишние слова.
+        """
+        return self.solve_captcha(image_data, language)
+
     @staticmethod
     def _parse_captcha_json(
         raw: str,

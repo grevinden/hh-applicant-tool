@@ -16,7 +16,7 @@ import pytest
 import requests
 
 from hh_applicant_tool.ai import ChatOpenAI, normalize_headers
-from hh_applicant_tool.main import HHApplicantTool
+from hh_applicant_tool.tool import HHApplicantTool
 
 
 class _Response:

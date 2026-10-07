@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from functools import cached_property
 from threading import Lock
-from typing import Any, Literal, TypeVar
+from typing import Any, Callable, Literal, TypeVar
 from urllib.parse import urlencode, urljoin
 
 from requests import Session
@@ -27,6 +27,10 @@ __all__ = ("ApiClient", "OAuthClient")
 HH_API_URL = "https://api.hh.ru/"
 HH_OAUTH_URL = "https://hh.ru/oauth/"
 AllowedMethods = Literal["GET", "POST", "PUT", "DELETE"]
+# Сколько раз один и тот же запрос повторяется после решения капчи
+CAPTCHA_RETRY_ATTEMPTS = 3
+# Пауза перед повторным запросом, чтобы hh.ru не счёл это флудом
+DEFAULT_CAPTCHA_COOLDOWN = 3.0
 T = TypeVar("T")
 
 
@@ -41,9 +45,16 @@ class BaseClient:
     user_agent: str | None = None
     session: Session | None = None
     throttle: Throttle | None = None
+    # Любой запрос, упёршийся в капчу, отдаётся сюда; хендлер решает
+    # капчу и возвращает True, если запрос имеет смысл повторить
+    captcha_handler: Callable[[str], bool] | None = None
+    captcha_cooldown: float | None = None
 
     def __post_init__(self) -> None:
         assert self.base_url.endswith("/"), "base_url must ends with /"
+        self.captcha_cooldown = (
+            self.captcha_cooldown or DEFAULT_CAPTCHA_COOLDOWN
+        )
         self.user_agent = self.user_agent or generate_android_useragent()
 
         # logger.debug(f"user agent: {self.user_agent}")
@@ -73,54 +84,79 @@ class BaseClient:
 
     def request(
         self,
-        method: AllowedMethods,
+        method: str,
         endpoint: str,
         params: dict[str, Any] | None = None,
         as_json: bool = False,
         **kwargs: Any,
     ) -> T:
-        # Не знаю насколько это "правильно"
-        assert method in AllowedMethods.__args__
+        # # Не знаю насколько это "правильно"
+        # assert method.upper() in AllowedMethods.__args__, (
+        #     f"Method unknown or not allowed: {method!r}"
+        # )
+        method = method.upper()
         params = dict(params or {})
         params.update(kwargs)
         url = self.resolve_url(endpoint)
-        with self.lock:
-            # Паузу перед запросом и отсчёт интервала делает сессия,
-            # см. api/throttle.py
-            has_body = method in ["POST", "PUT"]
-            payload = {
-                ["data", "json"][as_json] if has_body else "params": params
-            }
-            # logger.debug(f"request info: {method = }, {url = }, {headers = }, params = {repr(params)[:255]}")
-            response = self.session.request(
-                method,
-                url,
-                **payload,
-                headers=self._default_headers(),
-                allow_redirects=False,
-            )
-            try:
-                # У этих лошков сервер не отдает Content-Length, а кривое API
-                # отдает пустые ответы, например, при отклике на вакансии,
-                # и мы не можем узнать содержит ли ответ тело
-                # 'Server': 'ddos-guard'
-                # ...
-                # 'Transfer-Encoding': 'chunked'
-                try:
-                    rv = response.json() if response.text else {}
-                except json.JSONDecodeError as ex:
-                    raise errors.BadResponse(
-                        f"Can't decode JSON: {method} {url} ({response.status_code})"
-                    ) from ex
-            finally:
-                logger.debug(
-                    "%d %s %s with params: %.1000s",
-                    response.status_code,
+        attempt = 0
+        while True:
+            with self.lock:
+                # Паузу перед запросом и отсчёт интервала делает сессия,
+                # см. api/throttle.py
+                has_body = method in ["POST", "PUT"]
+                payload = {
+                    ["data", "json"][as_json] if has_body else "params": params
+                }
+                # logger.debug(f"request info: {method = }, {url = }, {headers = }, params = {repr(params)[:255]}")
+                response = self.session.request(
                     method,
                     url,
-                    params or "-",
+                    **payload,
+                    headers=self._default_headers(),
+                    allow_redirects=False,
                 )
-        errors.ApiError.raise_for_status(response, rv)
+                try:
+                    # У этих лошков сервер не отдает Content-Length, а кривое API
+                    # отдает пустые ответы, например, при отклике на вакансии,
+                    # и мы не можем узнать содержит ли ответ тело
+                    # 'Server': 'ddos-guard'
+                    # ...
+                    # 'Transfer-Encoding': 'chunked'
+                    try:
+                        rv = response.json() if response.text else {}
+                    except json.JSONDecodeError as ex:
+                        raise errors.BadResponse(
+                            f"Can't decode JSON: {method} {url} ({response.status_code})"
+                        ) from ex
+                finally:
+                    logger.debug(
+                        "%d %s %s with params: %.1000s",
+                        response.status_code,
+                        method,
+                        url,
+                        params or "-",
+                    )
+            try:
+                errors.ApiError.raise_for_status(response, rv)
+            except errors.CaptchaRequired as ex:
+                # Капчу решает хендлер уровня инструмента, а не эта
+                # функция: здесь только повтор с паузой и без бесконечного
+                # цикла, чтобы сломанный солвер не закрутил процесс
+                attempt += 1
+                if attempt >= CAPTCHA_RETRY_ATTEMPTS:
+                    raise
+                if not callable(self.captcha_handler):
+                    raise
+                if not self.captcha_handler(ex.captcha_url):
+                    raise
+                logger.info(
+                    "капча решена, повторяем запрос (%d/%d)",
+                    attempt,
+                    CAPTCHA_RETRY_ATTEMPTS,
+                )
+                time.sleep(self.captcha_cooldown)
+                continue
+            break
         assert 300 > response.status_code >= 200, (
             f"Unexpected status code for {method} {url}: {response.status_code}"
         )
@@ -220,6 +256,9 @@ class ApiClient(BaseClient):
             client_secret=self.client_secret,
             user_agent=self.user_agent,
             session=self.session,
+            throttle=self.throttle,
+            captcha_handler=self.captcha_handler,
+            captcha_cooldown=self.captcha_cooldown,
         )
 
     def _default_headers(
@@ -235,7 +274,7 @@ class ApiClient(BaseClient):
     # Реализовано автоматическое обновление токена
     def request(
         self,
-        method: AllowedMethods,
+        method: str,
         endpoint: str,
         params: dict[str, Any] | None = None,
         as_json: bool = False,

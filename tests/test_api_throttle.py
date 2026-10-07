@@ -346,7 +346,7 @@ class TestThrottleFlagPosition:
         ],
     )
     def test_parsed_in_any_position(self, argv, expected):
-        from hh_applicant_tool.main import HHApplicantTool
+        from hh_applicant_tool.tool import HHApplicantTool
 
         parser = HHApplicantTool()._parser
         args = parser.parse_args(argv)
@@ -360,7 +360,7 @@ class TestThrottleFlagPosition:
         общее пространство имён, поэтому флаг после подкоманды
         затирает указанный до неё.
         """
-        from hh_applicant_tool.main import HHApplicantTool
+        from hh_applicant_tool.tool import HHApplicantTool
 
         parser = HHApplicantTool()._parser
         args = parser.parse_args(
@@ -375,7 +375,7 @@ class TestThrottleFlagPosition:
         Регрессия: если бы у флага в парсере команды стоял обычный
         default, подпарсер записал бы его поверх разобранного раньше.
         """
-        from hh_applicant_tool.main import HHApplicantTool
+        from hh_applicant_tool.tool import HHApplicantTool
 
         parser = HHApplicantTool()._parser
         args = parser.parse_args(["--throttle", "5", "9", "apply"])
@@ -385,7 +385,7 @@ class TestThrottleFlagPosition:
 
 class TestToolWiring:
     def _tool(self, *argv: str):
-        from hh_applicant_tool.main import HHApplicantTool
+        from hh_applicant_tool.tool import HHApplicantTool
 
         tool = HHApplicantTool()
         tool._assign_args(

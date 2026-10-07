@@ -8,6 +8,7 @@ import random
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from email.message import EmailMessage
 from itertools import chain
@@ -36,12 +37,9 @@ from ..constants import (
     DEFAULT_COVER_LETTER_SYSTEM_PROMPT,
     DEFAULT_SITE_LANGUAGE,
 )
-from ..main import BaseNamespace, BaseOperation
 from ..storage.repositories.errors import RepositoryError
-from ..utils.cookiejar import (
-    cookies_to_playwright,
-    set_cookies_from_playwright,
-)
+from ..tool import BaseNamespace, BaseOperation
+from ..utils.argparse import str_or_file
 from ..utils.datatypes import VacancyTestsData
 from ..utils.find import find_key
 from ..utils.json import JSONDecoder
@@ -55,7 +53,7 @@ from ..utils.string import (
 )
 
 if TYPE_CHECKING:
-    from ..main import HHApplicantTool
+    from ..tool import HHApplicantTool
 
 
 class UnansweredTest(ValueError):
@@ -223,12 +221,18 @@ class Namespace(BaseNamespace):
     max_responses: int
     send_email: bool
     skip_tests: bool
+    ai_use_contact_details: bool
 
 
 class Operation(BaseOperation):
     """Откликнуться на все подходящие вакансии."""
 
     __aliases__ = ("apply", "apply-similar")
+
+    # Контактные данные кроме имени по умолчанию не уходят в промпт.
+    # Значение кладётся в run() из флага --ai-use-contact-details; тут
+    # дефолт на случай, когда run() ещё не вызывали
+    ai_use_contact_details = False
 
     def setup_parser(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--resume-id", help="Идентефикатор резюме")
@@ -271,19 +275,22 @@ class Operation(BaseOperation):
         )
         parser.add_argument(
             "--ai-filter-prompt",
-            help="Системный промпт для AI-фильтра (используется только в режиме custom)",
+            type=str_or_file,
+            help="Системный промпт для AI-фильтра (используется только в режиме custom). Принимает текст или путь до файла",
             default=None,
         )
         parser.add_argument(
             "--system-prompt",
             "--ai-system",
-            help="Системный промпт для AI генерации сопроводительных писем",
+            type=str_or_file,
+            help="Системный промпт для AI генерации сопроводительных писем. Принимает текст или путь до файла",
             default=DEFAULT_COVER_LETTER_SYSTEM_PROMPT,
         )
         parser.add_argument(
             "--message-prompt",
             "--prompt",
-            help="Промпт для генерации сопроводительного письма",
+            type=str_or_file,
+            help="Промпт для генерации сопроводительного письма. Принимает так же путь до файла",
             default="Сгенерируй сопроводительное письмо не более 5-7 предложений от моего имени для вакансии",  # noqa: E501
         )
         parser.add_argument(
@@ -354,6 +361,11 @@ class Operation(BaseOperation):
         parser.add_argument(
             "--skip-tests",
             help="Пропускать тесты при откликах вместо",
+            action=argparse.BooleanOptionalAction,
+        )
+        parser.add_argument(
+            "--ai-use-contact-details",
+            help="Использовать дополнительные контактные данные кроме имени в сопроводительных письмах, генерируемых через нейронку",
             action=argparse.BooleanOptionalAction,
         )
         parser.add_argument(
@@ -507,6 +519,10 @@ class Operation(BaseOperation):
     ) -> None:
         self.tool = tool
         self._args = args
+        # Капчу, пришедшую на любой запрос ApiClient, решает наш
+        # пайплайн: хендлер в client.py только зовёт сюда и повторяет
+        # запрос, а оставшиеся ветки логинов получают отказ
+        tool.captcha_solver = self._solve_captcha_sync
         self.cover_letter = (
             args.letter_file.read_text(encoding="utf-8", errors="ignore")
             if args.letter_file
@@ -559,6 +575,7 @@ class Operation(BaseOperation):
         self.test_ai = tool.get_test_ai() if args.use_ai else None
         self.ai_filter = args.ai_filter
         self.ai_filter_prompt = args.ai_filter_prompt
+        self.ai_use_contact_details = args.ai_use_contact_details or False
         self.vacancy_filter_ai = None
         self._resume_analysis_cache: dict[tuple[str | None, str], str] = {}
 
@@ -821,6 +838,7 @@ class Operation(BaseOperation):
         return None
 
     # КТО ЭТО ПРОЧИТАЛ ТОТ ПИД@РАС
+    # Сам такой
     def _is_vacancy_suitable_heavy(
         self,
         vacancy: dict,
@@ -965,6 +983,24 @@ class Operation(BaseOperation):
     CAPTCHA_VERDICT_REJECTED = "rejected"
     CAPTCHA_VERDICT_UNKNOWN = "unknown"
 
+    def _solve_captcha_sync(self, captcha_url: str) -> bool:
+        """Синхронная обёртка над асинхронным пайплайном капчи.
+
+        ApiClient вызывает хендлер из обычного кода, но часть
+        запросов идёт внутри уже работающего event loop (логин и
+        авторизация асинхронные), а `asyncio.run` в работающем цикле
+        падает. В этом случае уводим решение в отдельный поток, где
+        цикла нет.
+        """
+        coro = self._solve_captcha_async(captcha_url)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return bool(asyncio.run(coro))
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return bool(pool.submit(asyncio.run, coro).result())
+
     async def _solve_captcha_async(self, captcha_url: str) -> bool:
         """Решает капчу выбранным транспортом.
 
@@ -1084,7 +1120,7 @@ class Operation(BaseOperation):
 
         # Браузер должен работать в той же сессии, что и requests,
         # иначе hh.ru не признает капчу решенной (и ответит капчей снова)
-        session_cookies = cookies_to_playwright(cookiejar)
+        session_cookies = cookiejar.cookies_to_playwright()
         proxy = _playwright_proxy(session.proxies)
 
         async with async_playwright() as pw:
@@ -1177,7 +1213,7 @@ class Operation(BaseOperation):
                 # Делаем это и при отказе: обновленные куки hh.ru
                 # (тот же _xsrf, например) еще пригодятся
                 cookies = await context.cookies()
-                parsed = set_cookies_from_playwright(cookiejar, cookies)
+                parsed = cookiejar.set_cookies_from_playwright(cookies)
                 logger.debug("Получил из браузера %s кук", parsed)
                 if parsed:
                     try:
@@ -1467,6 +1503,7 @@ class Operation(BaseOperation):
                 return self.CAPTCHA_VERDICT_UNKNOWN
 
             await page.wait_for_timeout(500)
+
 
     def _apply_vacancies(self) -> None:
         resumes: list[datatypes.Resume] = self.tool.get_resumes()
@@ -1809,20 +1846,24 @@ class Operation(BaseOperation):
                             + "Идентификатор: "
                             + message_placeholders["resume_hash"]
                             + ", "
-                        )
-                        msg += (
-                            "Имя: "
+                            + "Имя: "
                             + message_placeholders["first_name"]
-                            + ", "
-                            + "Фамилия: "
-                            + message_placeholders["last_name"]
-                            + ", "
-                            + "Телефон: "
-                            + message_placeholders["phone"]
-                            + ", "
-                            + "Почта: "
-                            + message_placeholders["email"]
                         )
+                        # Я не думаю, что со всеми мошенниками в мире нужно
+                        # делиться своими контактными данными: по умолчанию
+                        # модели уходит только имя, остальное — по флагу
+                        if self.ai_use_contact_details:
+                            msg += (
+                                ", "
+                                + "Фамилия: "
+                                + message_placeholders["last_name"]
+                                + ", "
+                                + "Телефон: "
+                                + message_placeholders["phone"]
+                                + ", "
+                                + "Почта: "
+                                + message_placeholders["email"]
+                            )
                         # Идентификаторы отдаём, чтобы модель через
                         # инструменты шлюза могла дозагрузить вакансию,
                         # работодателя и резюме целиком
@@ -1848,6 +1889,8 @@ class Operation(BaseOperation):
                     vacancy["alternate_url"],
                 )
 
+                # Отклик на тест уже отправлен — второй раз POST
+                # /negotiations слать нельзя
                 test_handled = False
 
                 if vacancy.get("has_test"):
@@ -1888,16 +1931,10 @@ class Operation(BaseOperation):
                                     )
                                     break
                                 else:
-                                    status = (
-                                        result.get("_http_status")
-                                        if isinstance(result, dict)
-                                        else None
-                                    )
                                     logger.error(
-                                        "Произошла ошибка при отклике на вакансию с тестом: %s (HTTP %s), result: %s",
+                                        "Произошла ошибка при отклике на вакансию с тестом: %s, result: %.300s",
                                         vacancy["alternate_url"],
-                                        status if status is not None else "?",
-                                        shorten(str(result), 300),
+                                        result,
                                     )
                         else:
                             test_handled = True
@@ -1951,35 +1988,15 @@ class Operation(BaseOperation):
                         )
                         continue
                     except CaptchaRequired as ex:
-                        logger.warning(f"Требуется капча: {ex.captcha_url}")
-                        try:
-                            success = asyncio.run(
-                                self._solve_captcha_async(ex.captcha_url)
-                            )
-                        except Exception as e:
-                            logger.error(f"Ошибка при решении капчи: {e}")
-                            # Одна вакансия не должна убивать всю рассылку
-                            continue
-
-                        if not success:
-                            logger.error(
-                                "Не удалось решить капчу для %s, "
-                                "пропускаю вакансию",
-                                vacancy["alternate_url"],
-                            )
-                            continue
-
-                        if not self.dry_run:
-                            res = self.api_client.post(
-                                "/negotiations",
-                                params,
-                            )
-                            assert res == {}
-                            applied_count += 1
-                            print(
-                                "📨 Отправили отклик на вакансию после капчи",
-                                vacancy["alternate_url"],
-                            )
+                        # Капчу уже пробовал решить хендлер уровня
+                        # ApiClient: сюда она попадает только если солвер
+                        # сдался или его нет, так что повторять бессмысленно
+                        logger.warning(
+                            "Требуется капча (%s), пропускаю вакансию: %s",
+                            ex.captcha_url,
+                            vacancy["alternate_url"],
+                        )
+                        continue
 
                 # Отправка письма на email
                 if self.args.send_email:
@@ -2059,7 +2076,7 @@ class Operation(BaseOperation):
 
     def _get_vacancy_tests(self, response_url: str) -> VacancyTestsData | None:
         """Парсит тесты"""
-        res = self.tool.get_redirect_config(response_url)
+        res = self.tool.fetch_initial_state(response_url)
         return find_key(res, "vacancyTests")
 
     def _solve_vacancy_test(
@@ -2224,9 +2241,6 @@ class Operation(BaseOperation):
                 "Эндпоинт отклика на тест вернул не-JSON ответ "
                 "(возможно, перенаправление на капчу или форму)."
             ) from ex
-
-        if isinstance(data, dict):
-            data["_http_status"] = response.status_code
 
         return data
 

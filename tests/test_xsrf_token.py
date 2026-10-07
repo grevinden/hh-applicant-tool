@@ -15,7 +15,7 @@ from http.cookiejar import Cookie, CookieJar
 
 import pytest
 
-from hh_applicant_tool.main import HHApplicantTool
+from hh_applicant_tool.tool import HHApplicantTool
 
 
 def cookie_jar(data: dict[str, str]) -> CookieJar:
