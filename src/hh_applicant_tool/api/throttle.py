@@ -9,6 +9,11 @@ random.uniform(1, 3), а базовый интервал между запрос
 Здесь живут оба интервала и держит их одна очередь на инструмент:
 все запросы к hh.ru уходят через ThrottledSession, независимо от
 того, отправляет их ApiClient или кто-то ещё.
+
+Отдельно: таймаут и сетевые ритраи. hh.ru иногда зависает или рвёт
+соединение; без таймаута такой запрос висел бы до системного лимита.
+Поэтому у ThrottledSession есть таймаут по умолчанию и повтор
+запроса после обрыва/таймаута.
 """
 
 from __future__ import annotations
@@ -31,6 +36,26 @@ DEFAULT_DELAY = 0.345
 # что раньше было захардкожено в трёх местах отправки отклика
 DEFAULT_THROTTLE_MIN = 1.0
 DEFAULT_THROTTLE_MAX = 3.0
+# Таймаут запроса к hh.ru, если вызывающий код свой не задал. hh.ru
+# иногда зависает: без таймаута запрос висит до системного лимита,
+# а его надо ломать и запускать заново
+DEFAULT_HH_TIMEOUT = 15.0
+# Сколько раз повторить запрос к hh.ru после сетевого сбоя
+DEFAULT_HH_RETRIES = 3
+# Базовая задержка перед повтором: растёт с каждой попыткой
+DEFAULT_HH_RETRY_DELAY = 1.0
+
+# Сетевые сбои, которые имеет смысл повторить: соединение с hh.ru
+# может зависнуть до таймаута или оборваться. Остальное (битый URL,
+# отказ SSL) повтором не лечится
+_RETRYABLE_EXCEPTIONS = (
+    requests.exceptions.Timeout,
+    requests.exceptions.ConnectionError,
+)
+
+
+def _is_retryable(ex: Exception) -> bool:
+    return isinstance(ex, _RETRYABLE_EXCEPTIONS)
 
 
 class Throttle:
@@ -78,20 +103,58 @@ class Throttle:
 
 
 class ThrottledSession(requests.Session):
-    """Сессия, которая перед каждым запросом ждёт общую паузу."""
+    """Сессия, которая перед каждым запросом ждёт общую паузу.
+
+    Плюс сетевые ритраи: hh.ru иногда зависает или рвёт соединение.
+    Таймаут по умолчанию ломает зависший запрос, а обрыв/таймаут
+    соединения повторяются; свой таймаут вызывающего кода уважается.
+    """
 
     throttle: Throttle
+    timeout: float = DEFAULT_HH_TIMEOUT
+    max_retries: int = DEFAULT_HH_RETRIES
+    retry_delay: float = DEFAULT_HH_RETRY_DELAY
 
-    def __init__(self, throttle: Throttle | None = None) -> None:
+    def __init__(
+        self,
+        throttle: Throttle | None = None,
+        *,
+        timeout: float = DEFAULT_HH_TIMEOUT,
+        max_retries: int = DEFAULT_HH_RETRIES,
+        retry_delay: float = DEFAULT_HH_RETRY_DELAY,
+    ) -> None:
         super().__init__()
         self.throttle = throttle if throttle is not None else Throttle()
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+
+    def _get_network_retry_delay(self, attempt: int) -> float:
+        """Задержка перед повтором после сетевого сбоя."""
+        return max(self.retry_delay * (attempt + 1), 1.0)
 
     def request(self, method: str, url: str, **kwargs: Any) -> Any:
-        self.throttle.wait()
-        try:
-            return super().request(method, url, **kwargs)
-        finally:
-            self.throttle.mark_done()
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = self.timeout
+
+        # Каждая попытка держит свою паузу и помечает конец запроса,
+        # иначе очередь рассинхронизируется
+        for attempt in range(self.max_retries + 1):
+            self.throttle.wait()
+            try:
+                return super().request(method, url, **kwargs)
+            except requests.exceptions.RequestException as ex:
+                # Обрыв соединения и таймаут повторяем, а не роняем
+                # отклик на первом же сбое
+                if attempt >= self.max_retries or not _is_retryable(ex):
+                    raise
+                delay = self._get_network_retry_delay(attempt)
+                logger.warning(
+                    "hh.ru network error, retry in %.2fs: %s", delay, ex
+                )
+                time.sleep(delay)
+            finally:
+                self.throttle.mark_done()
 
 
 def wrap_session(

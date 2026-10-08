@@ -26,6 +26,8 @@ import requests
 from hh_applicant_tool.api.client import ApiClient
 from hh_applicant_tool.api.throttle import (
     DEFAULT_DELAY,
+    DEFAULT_HH_RETRIES,
+    DEFAULT_HH_TIMEOUT,
     DEFAULT_THROTTLE_MAX,
     DEFAULT_THROTTLE_MIN,
     Throttle,
@@ -229,6 +231,129 @@ class TestThrottledSession:
 
         with pytest.raises(requests.RequestException):
             session.get("https://hh.ru/")
+
+        assert throttle._previous_request_time > 0
+
+
+class TestThrottledSessionNetworkRetry:
+    """Повтор запроса после обрыва/таймаута соединения с hh.ru."""
+
+    def test_default_timeout_applied(self):
+        """Без своего таймаута запрос получает общий DEFAULT_HH_TIMEOUT."""
+        throttle = Throttle(pause=(0.0, 0.0))
+        session = ThrottledSession(throttle)
+        session.send = MagicMock(return_value=_FakeResponse())  # type: ignore[method-assign]
+
+        session.get("https://hh.ru/vacancy/1")
+
+        _prepared, kwargs = session.send.call_args
+        assert kwargs["timeout"] == DEFAULT_HH_TIMEOUT
+
+    def test_caller_timeout_wins(self):
+        """Явный таймаут вызывающего кода не должен перетираться."""
+        throttle = Throttle(pause=(0.0, 0.0))
+        session = ThrottledSession(throttle)
+        session.send = MagicMock(return_value=_FakeResponse())  # type: ignore[method-assign]
+
+        session.get("https://hh.ru/vacancy/1", timeout=10)
+
+        _prepared, kwargs = session.send.call_args
+        assert kwargs["timeout"] == 10
+
+    def test_connection_error_retried(self, slept):
+        """Оборванное соединение не роняет запрос с первого раза."""
+        throttle = Throttle(pause=(0.0, 0.0))
+        session = ThrottledSession(throttle)
+        calls: list[object] = []
+
+        def send(prepared, **kwargs):
+            calls.append(prepared)
+            if len(calls) <= 1:
+                raise requests.exceptions.ConnectionError("network down")
+            return _FakeResponse()
+
+        session.send = MagicMock(side_effect=send)  # type: ignore[method-assign]
+
+        response = session.get("https://hh.ru/vacancy/1")
+
+        assert response.status_code == 200
+        assert len(calls) == 2
+
+    def test_timeout_retried(self, slept):
+        """Зависшее до таймаута соединение повторяется."""
+        throttle = Throttle(pause=(0.0, 0.0))
+        session = ThrottledSession(throttle)
+        calls: list[object] = []
+
+        def send(prepared, **kwargs):
+            calls.append(prepared)
+            if len(calls) <= 2:
+                raise requests.exceptions.Timeout("timed out")
+            return _FakeResponse()
+
+        session.send = MagicMock(side_effect=send)  # type: ignore[method-assign]
+
+        response = session.get("https://hh.ru/vacancy/1")
+
+        assert response.status_code == 200
+        assert len(calls) == 3
+
+    def test_retries_exhausted(self, slept):
+        """Когда повторы закончились, последняя ошибка всплывает."""
+        throttle = Throttle(pause=(0.0, 0.0))
+        session = ThrottledSession(throttle)
+        calls: list[object] = []
+
+        def send(prepared, **kwargs):
+            calls.append(prepared)
+            raise requests.exceptions.ConnectionError("network down")
+
+        session.send = MagicMock(side_effect=send)  # type: ignore[method-assign]
+
+        with pytest.raises(requests.exceptions.ConnectionError):
+            session.get("https://hh.ru/vacancy/1")
+
+        # Первая попытка плюс max_retries повторов
+        assert len(calls) == DEFAULT_HH_RETRIES + 1
+
+    def test_retries_back_off(self, slept):
+        """Пауза между повторами растёт с каждой попыткой."""
+        throttle = Throttle(delay=0.0, pause=(0.0, 0.0))
+        session = ThrottledSession(throttle)
+        session.send = MagicMock(  # type: ignore[method-assign]
+            side_effect=requests.exceptions.ConnectionError("network down")
+        )
+
+        with pytest.raises(requests.exceptions.ConnectionError):
+            session.get("https://hh.ru/vacancy/1")
+
+        # Паузы троттля здесь нулевые, отсюда только сами задержки
+        # повторов, и они растут с каждой попыткой
+        assert slept == pytest.approx([1.0, 2.0, 3.0])
+
+    def test_non_retryable_error_not_retried(self):
+        """Не сетевой сбой повтором не лечится и не повторяется."""
+        throttle = Throttle(pause=(0.0, 0.0))
+        session = ThrottledSession(throttle)
+        session.send = MagicMock(  # type: ignore[method-assign]
+            side_effect=requests.exceptions.InvalidURL("bad url")
+        )
+
+        with pytest.raises(requests.exceptions.InvalidURL):
+            session.get("https://hh.ru/vacancy/1")
+
+        assert session.send.call_count == 1
+
+    def test_failed_retries_still_mark_done(self, slept):
+        """Очередь в синхроне даже после исчерпанных повторов."""
+        throttle = Throttle(pause=(0.0, 0.0))
+        session = ThrottledSession(throttle)
+        session.send = MagicMock(  # type: ignore[method-assign]
+            side_effect=requests.exceptions.ConnectionError("network down")
+        )
+
+        with pytest.raises(requests.exceptions.ConnectionError):
+            session.get("https://hh.ru/vacancy/1")
 
         assert throttle._previous_request_time > 0
 
