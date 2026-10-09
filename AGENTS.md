@@ -11,7 +11,7 @@
 установки. Merge апстрима меняет `version` в `pyproject.toml`, и без
 переустановки версия в venv расходится с версией в проекте.
 
-Проверка версии в `utils/mixins.py` сверяет версию установленного пакета
+Проверка версии в `mixins.py` сверяет версию установленного пакета
 с версией на PyPI. При расхождении пользователь видит:
 
 ```
@@ -24,11 +24,12 @@
 (`git fetch && git merge origin/main`) выполнять:
 
 ```bash
-poetry install -E playwright -E pillow -E ui
+poetry install -E playwright -E ui
 ```
 
-Экзотика перечисления в `-E` обязательна: запятая в одном флаге (`-E
-playwright,pillow`) не работает.
+Доступные extras: `playwright` и `ui`. Экстра `pillow` больше нет —
+`pillow` стал базовой зависимостью. Экзотика перечисления в `-E`
+обязательна: запятая в одном флаге (`-E playwright,ui`) не работает.
 
 Пользователю об этом сообщении сообщать не нужно: это следствие нашего
 же merge, а не его действий. Достаточно прогнать команду выше.
@@ -38,7 +39,7 @@ playwright,pillow`) не работает.
 Тесты и линтер запускаются без venv, системным Python:
 
 ```bash
-PYTHONPATH=src uvx --quiet --with requests --with pytest --with prettytable pytest tests/ -q
+PYTHONPATH=src uvx --quiet --with requests --with pytest --with tomli-w --with brotli --with cryptography pytest tests/ -q
 uvx ruff@0.14.9 check src/ tests/
 ```
 
