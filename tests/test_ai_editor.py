@@ -77,6 +77,7 @@ class TestApplyEditor:
         operation.max_responses = 0
         operation.dry_run = False
         operation.excluded_filter = None
+        operation._resume_analysis_cache = {}
         operation.message_prompt = "Напиши письмо"
         operation.force_message = True
         operation.cover_letter = "письмо"
@@ -88,6 +89,11 @@ class TestApplyEditor:
             iter([dict(VACANCY)])
         )
         operation.__dict__["api_client"] = MagicMock()
+        operation.api_client.get.side_effect = lambda url: (
+            {"description": "<p>Описание вакансии</p>"}
+            if "vacancies" in url
+            else {"title": "Python разработчик", "skills": "О себе"}
+        )
         operation.api_client.post.return_value = {}
         return operation
 

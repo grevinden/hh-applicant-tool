@@ -567,11 +567,31 @@ class Operation(BaseOperation):
         self.ai_use_contact_details = args.ai_use_contact_details or False
         self.vacancy_filter_ai = None
         self._resume_analysis_cache: dict[tuple[str | None, str], str] = {}
+        self._full_vacancy_cache: dict[str, dict] = {}
 
         self._apply_vacancies()
 
     def _get_full_resume(self, resume_id: str) -> dict:
         return self.api_client.get(f"/resumes/{resume_id}")
+
+    def _get_full_vacancy(self, vacancy: dict) -> dict | None:
+        """Полная вакансия с описанием — с кэшем на время запуска.
+
+        Описание нужно и фильтру, и письму. Тянуть одну и ту же вакансию
+        дважды на каждой итерации незачем: запросы к hh.ru лимитированы,
+        а ответ в пределах запуска не меняется.
+        """
+        vacancy_id = vacancy.get("id")
+        if not vacancy_id:
+            return None
+        cache = getattr(self, "_full_vacancy_cache", None)
+        if cache is None:
+            cache = self._full_vacancy_cache = {}
+        if vacancy_id not in cache:
+            cache[vacancy_id] = self.api_client.get(
+                f"/vacancies/{vacancy_id}"
+            )
+        return cache[vacancy_id]
 
     def _analyze_resume_heavy(self, resume: dict) -> str:
         resume_id = resume.get("id")
@@ -835,9 +855,7 @@ class Operation(BaseOperation):
         log_suffix: str = "(heavy)",
         resume: dict | None = None,
     ) -> bool:
-        full_vacancy = None
-        if vacancy.get("id"):
-            full_vacancy = self.api_client.get(f"/vacancies/{vacancy['id']}")
+        full_vacancy = self._get_full_vacancy(vacancy)
 
         vacancy_info = self._build_vacancy_context(
             vacancy,
@@ -1813,37 +1831,48 @@ class Operation(BaseOperation):
                     "response_letter_required"
                 ):
                     if self.cover_letter_ai:
-                        msg = self.message_prompt + "\n"
-                        ## добавляем переменные в контекст AI запроса ##
-                        msg += (
-                            "[ВАКАНСИЯ] "
-                            + "Название: "
-                            + message_placeholders["vacancy_name"]
-                            + ", "
-                            + "Работодатель: "
-                            + message_placeholders["employer_name"]
-                            + "; "
+                        # Данные вакансии и резюме отдаём модели текстом.
+                        # По одним названиям и ссылкам на дозагрузку письмо
+                        # не написать: модель уходит искать вакансию,
+                        # работодателя и резюме инструментами шлюза, резюме
+                        # по идентификатору не находит и зацикливается, а
+                        # отклик всё это время не уходит.
+                        try:
+                            full_vacancy = self._get_full_vacancy(vacancy)
+                        except ApiError as ex:
+                            logger.warning(
+                                "Не удалось загрузить вакансию %s: %s",
+                                vacancy.get("id"),
+                                ex,
+                            )
+                            full_vacancy = None
+
+                        vacancy_context = self._build_vacancy_context(
+                            vacancy,
+                            full_vacancy=full_vacancy,
+                            include_full=True,
                         )
-                        # Ссылка на резюме модели бесполезна: инструменты
-                        # шлюза грузят резюме по идентификатору
+                        resume_context = self._analyze_resume_heavy(resume)
+
+                        msg = self.message_prompt + "\n"
+                        msg += f"[ВАКАНСИЯ]\n{vacancy_context}\n"
                         msg += (
-                            "[РЕЗЮМЕ] "
+                            "[РЕЗЮМЕ]\n"
                             + "Название: "
                             + message_placeholders["resume_title"]
-                            + ", "
-                            + "Идентификатор: "
-                            + message_placeholders["resume_hash"]
-                            + ", "
+                            + "\n"
                             + "Имя: "
                             + message_placeholders["first_name"]
+                            + "\n"
                         )
+                        if resume_context:
+                            msg += resume_context + "\n"
                         # Я не думаю, что со всеми мошенниками в мире нужно
                         # делиться своими контактными данными: по умолчанию
                         # модели уходит только имя, остальное — по флагу
                         if self.ai_use_contact_details:
                             msg += (
-                                ", "
-                                + "Фамилия: "
+                                "Фамилия: "
                                 + message_placeholders["last_name"]
                                 + ", "
                                 + "Телефон: "
@@ -1851,17 +1880,8 @@ class Operation(BaseOperation):
                                 + ", "
                                 + "Почта: "
                                 + message_placeholders["email"]
+                                + "\n"
                             )
-                        # Идентификаторы отдаём, чтобы модель через
-                        # инструменты шлюза могла дозагрузить вакансию,
-                        # работодателя и резюме целиком
-                        ids_context = self._build_ids_context(
-                            vacancy=vacancy,
-                            resume=resume,
-                        )
-                        if ids_context:
-                            msg = f"{msg}\n{ids_context}\n{AI_TOOLS_HINT}"
-                        ## logger.debug("prompt: %s", msg) ## убираем отладку
                         letter = self.cover_letter_ai.complete(msg)
                     else:
                         letter = render_template(

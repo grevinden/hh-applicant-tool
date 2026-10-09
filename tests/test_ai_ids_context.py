@@ -175,9 +175,9 @@ class TestHeavyFilterPrompt:
 
 
 class TestCoverLetterPrompt:
-    """Та же схема в сопроводительном письме."""
+    """Письму отдаём данные вакансии и резюме текстом, а не ссылки."""
 
-    def test_letter_request_carries_ids(self):
+    def test_letter_request_carries_source_data(self):
         operation = Operation()
         operation._args = SimpleNamespace(
             ai_rate_limit=0,
@@ -198,6 +198,21 @@ class TestCoverLetterPrompt:
         operation.cover_letter_ai = MagicMock()
         operation.cover_letter_ai.complete.return_value = "Здравствуйте!"
         operation.editor_ai = None
+        operation._resume_analysis_cache = {}
+        operation.__dict__["api_client"] = MagicMock()
+        operation.api_client.get.side_effect = lambda url: (
+            {
+                "id": "111",
+                "name": "Senior Python",
+                "description": "<p>Описание вакансии</p>",
+                "employer": {"id": "222", "name": "ООО Ромашка"},
+            }
+            if "vacancies" in url
+            else {
+                "title": "Python разработчик",
+                "skills": "Технологии: Python, Django",
+            }
+        )
         operation._get_vacancies = lambda resume_id=None, resume_title="": (
             iter([dict(VACANCY)])
         )
@@ -209,12 +224,12 @@ class TestCoverLetterPrompt:
         )
 
         msg = operation.cover_letter_ai.complete.call_args.args[0]
-        assert "[ДАННЫЕ ДЛЯ ДОЗАГРУЗКИ]" in msg
-        assert "вакансия: https://hh.ru/vacancy/111" in msg
-        assert "работодатель: https://hh.ru/employer/222" in msg
-        assert "резюме: resume-1" in msg
-        assert "hh.ru/resume" not in msg
-        assert AI_TOOLS_HINT in msg
+        assert "Описание вакансии" in msg
+        assert "Технологии: Python, Django" in msg
+        # Данные уже в промпте, ссылки на дозагрузку не нужны.
+        assert "[ДАННЫЕ ДЛЯ ДОЗАГРУЗКИ]" not in msg
+        assert "hh.ru/vacancy/111" not in msg
+        assert AI_TOOLS_HINT not in msg
 
 
 class TestIdsInFlow:
