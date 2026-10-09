@@ -40,7 +40,7 @@ def test_list_profiles_discovers_directories_and_saved_token(tmp_path):
 
     (tmp_path / "work").mkdir()
     (tmp_path / ".second").mkdir()
-    Config(tmp_path / "work" / "config.json").save(
+    Config(tmp_path / "work" / "config.toml").save(
         token={"access_token": "token"}
     )
 

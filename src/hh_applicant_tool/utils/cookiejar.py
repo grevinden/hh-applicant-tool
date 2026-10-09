@@ -59,7 +59,6 @@ class HHOnlyCookieJar(MozillaCookieJar):
             )
         )
 
-        # Зачем эта проверка?
         return any(
             cookie.name == SITE_LANGUAGE_COOKIE and cookie.value == language
             for cookie in self

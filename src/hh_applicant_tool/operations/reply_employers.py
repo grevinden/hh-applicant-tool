@@ -33,7 +33,6 @@ class Namespace(BaseNamespace):
     max_pages: int
     only_invitations: bool
     dry_run: bool
-    use_ai: bool
     system_prompt: str
     message_prompt: str
     period: int
@@ -82,12 +81,6 @@ class Operation(BaseOperation):
             action=argparse.BooleanOptionalAction,
         )
         parser.add_argument(
-            "--use-ai",
-            "--ai",
-            help="Использовать AI для автоматической генерации ответов",
-            action=argparse.BooleanOptionalAction,
-        )
-        parser.add_argument(
             "--system-prompt",
             "--ai-system",
             help="Системный промпт для AI",
@@ -103,7 +96,7 @@ class Operation(BaseOperation):
     def run(self, tool: HHApplicantTool, args: Namespace) -> None:
         self.tool = tool
         self.api_client = tool.api_client
-        #self.resume_id = tool.first_resume_id() #вместо id первого резюме берем id из аргументов
+        # self.resume_id = tool.first_resume_id() #вместо id первого резюме берем id из аргументов
         self.resume_id = args.resume_id
         self.reply_message = args.reply_message or tool.config.get(
             "reply_message"
@@ -131,7 +124,7 @@ class Operation(BaseOperation):
         resumes = self.tool.get_resumes()
         resumes = (
             list(filter(lambda x: x["id"] == self.resume_id, resumes))
-            if self.resume_id is not None # добавляем проверку на пустоту
+            if self.resume_id is not None  # добавляем проверку на пустоту
             else resumes
         )
         resumes = list(

@@ -41,8 +41,7 @@ from ..storage.repositories.errors import RepositoryError
 from ..tool import BaseNamespace, BaseOperation
 from ..utils.argparse import str_or_file
 from ..utils.datatypes import VacancyTestsData
-from ..utils.find import find_key
-from ..utils.json import JSONDecoder
+from ..utils.mappings import find_key
 from ..utils.string import (
     bool2str,
     rand_text,
@@ -175,15 +174,8 @@ class Namespace(BaseNamespace):
     letter_file: Path | None
     ignore_employers: Path | None
     force_message: bool
-    use_ai: bool
     ai_filter: Literal["heavy", "light", "custom"] | None
-    ai_rate_limit: int
     ai_filter_prompt: str | None
-    captcha_strategy: str | None
-    captcha_samples: int | None
-    captcha_min_votes: int | None
-    captcha_transport: str | None
-    captcha_language: str | None
     system_prompt: str
     message_prompt: str
     order_by: str
@@ -256,22 +248,10 @@ class Operation(BaseOperation):
             action=argparse.BooleanOptionalAction,
         )
         parser.add_argument(
-            "--use-ai",
-            "--ai",
-            help="Использовать AI для генерации сообщений",
-            action=argparse.BooleanOptionalAction,
-        )
-        parser.add_argument(
             "--ai-filter",
             help="Использовать AI для фильтрации вакансий. Режимы: heavy - полный анализ вакансии и резюме, light - быстрый анализ по названию и навыкам, custom - свой системный промпт (--ai-filter-prompt)",
             choices=["heavy", "light", "custom"],
             default=None,
-        )
-        parser.add_argument(
-            "--ai-rate-limit",
-            help="Лимит запросов к AI в минуту для фильтрации",
-            type=int,
-            default=40,
         )
         parser.add_argument(
             "--ai-filter-prompt",
@@ -810,6 +790,7 @@ class Operation(BaseOperation):
         )
         return True
 
+    # ПЕРЕПИШИТЕ ЭТО ГОВНО!!!
     def _parse_ai_json_response(self, response: str) -> bool | None:
         response = response.strip().lower()
 
@@ -1624,9 +1605,6 @@ class Operation(BaseOperation):
                 system_prompt
             )
 
-            if self.args.ai_rate_limit:
-                self.vacancy_filter_ai.rate_limit = self.args.ai_rate_limit
-
         for vacancy in self._get_vacancies(
             resume_id=resume["id"], resume_title=resume["title"]
         ):
@@ -2084,11 +2062,9 @@ class Operation(BaseOperation):
         msg.set_content(body)
         self.tool.smtp.send_message(msg)
 
-    json_decoder = JSONDecoder()
-
     def _get_vacancy_tests(self, response_url: str) -> VacancyTestsData | None:
         """Парсит тесты"""
-        res = self.tool.fetch_initial_state(response_url)
+        res = self.tool.get_initial_state(response_url)
         return find_key(res, "vacancyTests")
 
     def _solve_vacancy_test(
@@ -2314,17 +2290,13 @@ class Operation(BaseOperation):
             if not item.startswith("*.")
         )
 
-    def _get_search_params(self, page: int, text: str | None = None) -> dict:
+    def _get_search_params(self, page: int) -> dict:
         params = {
             "page": page,
             "per_page": self.per_page,
         }
         if self.order_by:
             params |= {"order_by": self.order_by}
-        if text is None:
-            text = self.search
-        if text:
-            params["text"] = text
         if self.schedule:
             params["schedule"] = self.schedule
         if self.work_format:
@@ -2375,10 +2347,6 @@ class Operation(BaseOperation):
             params["only_with_salary"] = bool2str(self.only_with_salary)
         # if self.clusters:
         #     params["clusters"] = bool2str(self.clusters)
-        # magic (авторазбор запроса hh.ru) включён по умолчанию, и шлём
-        # его явно: дефолт на стороне hh мы не контролируем, а без
-        # разбора запроса подстановка тайтла резюме работает заметно
-        # хуже. Выключается только --no-magic.
         params["no_magic"] = bool2str(self.no_magic)
         if self.premium:
             params["premium"] = bool2str(self.premium)
@@ -2410,19 +2378,18 @@ class Operation(BaseOperation):
 
         for page in range(self.total_pages):
             logger.debug(f"Загружаем вакансии со страницы: {page + 1}")
-            params = self._get_search_params(page, text=text)
+            params = self._get_search_params(page)
+            if text:
+                params |= {"text": text}
 
             if self.search:
-                res: PaginatedItems[SearchVacancy] = self.api_client.get(
-                    "/vacancies",
-                    params,
-                )
+                search_endpoint = "/vacancies"
             else:
-                res: PaginatedItems[SearchVacancy] = self.api_client.get(
-                    f"/resumes/{resume_id}/similar_vacancies",
-                    params,
-                )
-
+                search_endpoint = f"/resumes/{resume_id}/similar_vacancies"
+            res: PaginatedItems[SearchVacancy] = self.api_client.get(
+                search_endpoint,
+                params,
+            )
             logger.debug(f"Количество вакансий: {res['found']}")
 
             if not res["items"]:
@@ -2459,23 +2426,17 @@ class Operation(BaseOperation):
             return True
 
         # Грузим полный текст вакансии только, если предыдущий фильтр не сработал
-        r = self.tool.session.get("https://hh.ru/vacancy/" + vacancy["id"])
-        r.raise_for_status()
-
-        # На странице вакансии поле description иногда встречается в двух
-        # вариантах верстки: `"description": "..."` и `"description":"..."`
-        # (без пробела после двоеточия) — учитываем оба.
-        description_match = re.search(r'"description":\s*(.*)', r.text)
-        if not description_match:
+        state = self.tool.get_initial_state(
+            "https://hh.ru/vacancy/" + vacancy["id"]
+        )
+        description = find_key(state, "description")
+        if not description:
             logger.warning(
                 "Не удалось найти описание вакансии на странице: %s",
                 vacancy["alternate_url"],
             )
             return False
 
-        description, _ = self.json_decoder.raw_decode(
-            description_match.group(1)
-        )
         description = strip_tags(description)
         logger.debug(description[:2047])
         return bool(excluded_pat.search(description))
