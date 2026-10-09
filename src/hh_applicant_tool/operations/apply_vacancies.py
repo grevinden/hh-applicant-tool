@@ -248,6 +248,12 @@ class Operation(BaseOperation):
             action=argparse.BooleanOptionalAction,
         )
         parser.add_argument(
+            "--use-ai",
+            "--ai",
+            help="Использовать AI для генерации сообщений",
+            action=argparse.BooleanOptionalAction,
+        )
+        parser.add_argument(
             "--ai-filter",
             help="Использовать AI для фильтрации вакансий. Режимы: heavy - полный анализ вакансии и резюме, light - быстрый анализ по названию и навыкам, custom - свой системный промпт (--ai-filter-prompt)",
             choices=["heavy", "light", "custom"],

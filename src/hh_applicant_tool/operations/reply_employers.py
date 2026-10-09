@@ -81,6 +81,12 @@ class Operation(BaseOperation):
             action=argparse.BooleanOptionalAction,
         )
         parser.add_argument(
+            "--use-ai",
+            "--ai",
+            help="Использовать AI для автоматической генерации ответов",
+            action=argparse.BooleanOptionalAction,
+        )
+        parser.add_argument(
             "--system-prompt",
             "--ai-system",
             help="Системный промпт для AI",
