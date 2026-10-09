@@ -2058,6 +2058,10 @@ class Operation(BaseOperation):
                                     )
                         else:
                             test_handled = True
+                            # dry-run: отклик не отправляем, но считаем
+                            # вакансию израсходованной, чтобы ограничение
+                            # --max-responses работало и в предпросмотре
+                            applied_count += 1
                     except UnansweredTest as ex:
                         # Модель не уверена в ответе — вакансию
                         # пропускаем. Это не ошибка, и отклик вслепую
@@ -2102,6 +2106,11 @@ class Operation(BaseOperation):
                                 "📨 Отправили отклик на вакансию",
                                 vacancy["alternate_url"],
                             )
+                        else:
+                            # dry-run: POST не отправляем, но считаем
+                            # вакансию израсходованной, чтобы ограничение
+                            # --max-responses работало и в предпросмотре
+                            applied_count += 1
                     except Redirect:
                         logger.warning(
                             f"Игнорирую перенаправление на форму: {vacancy['alternate_url']}"  # noqa: E501
