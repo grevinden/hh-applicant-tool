@@ -569,6 +569,9 @@ class Operation(BaseOperation):
             if args.use_ai
             else None
         )
+        # Второй вызов модели: редактор готового письма. Работает всегда
+        # вместе с --use-ai, отдельного флага у него нет.
+        self.editor_ai = tool.get_editor_ai() if args.use_ai else None
         # Тесты — отдельный клиент со своим промптом. Раньше вопросы
         # теста уходили в cover_letter_ai, и модель, решая тест,
         # получала промпт сопроводительного письма.
@@ -1882,6 +1885,14 @@ class Operation(BaseOperation):
                             message_placeholders,
                             "сопроводительном письме",
                         )
+
+                    # Редактор получает только текст письма — без данных
+                    # о вакансии. Если он упал, отправляем как есть.
+                    if self.editor_ai and letter:
+                        try:
+                            letter = self.editor_ai.complete(letter)
+                        except AIError as ex:
+                            logger.warning(f"Ошибка OpenAI редактора: {ex}")
 
                     logger.debug(letter)
 

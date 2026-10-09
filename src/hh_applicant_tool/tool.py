@@ -39,6 +39,7 @@ from .constants import (
     COOKIES_FILENAME,
     DATABASE_FILENAME,
     DEFAULT_CAPTCHA_LANGUAGE,
+    DEFAULT_EDITOR_SYSTEM_PROMPT,
     DEFAULT_OPENAI_CONNECT_TIMEOUT,
     DEFAULT_OPENAI_TIMEOUT,
     DEFAULT_SITE_LANGUAGE,
@@ -593,6 +594,15 @@ class HHApplicantTool(MegaTool, BaseAttrs):
     def get_cover_letter_ai(self, system_prompt: str) -> ai.ChatOpenAI:
         return self.get_ai_client(system_prompt, purpose="cover_letter")
 
+    def get_editor_ai(self) -> ai.ChatOpenAI:
+        # Второй вызов модели после письма: редактор получает только
+        # готовый текст и очеловечивает его. Задание и данные о вакансии
+        # ему не нужны — иначе он снова начнёт сочинять, а не править.
+        return self.get_ai_client(
+            system_prompt=DEFAULT_EDITOR_SYSTEM_PROMPT,
+            purpose="editor",
+        )
+
     def get_vacancy_filter_ai(self, system_prompt: str) -> ai.ChatOpenAI:
         return self.get_ai_client(system_prompt, purpose="vacancy_filter")
 
@@ -629,6 +639,7 @@ class HHApplicantTool(MegaTool, BaseAttrs):
         "captcha",
         "chat",
         "test",
+        "editor",
     ]
 
     def has_openai_config(self) -> bool:
@@ -660,7 +671,7 @@ class HHApplicantTool(MegaTool, BaseAttrs):
             # нет, вопросы теста ходят туда же, куда письма, но со своим
             # промптом. Так не появляется новый адрес шлюза, который надо
             # ещё прописать, чтобы просто ответить на тест.
-            fallback_purposes = {"test": "cover_letter"}
+            fallback_purposes = {"test": "cover_letter", "editor": "cover_letter"}
             if not self.config.get(section_name, {}):
                 purpose = fallback_purposes.get(purpose, purpose)
                 section_name = f"openai_{purpose}"

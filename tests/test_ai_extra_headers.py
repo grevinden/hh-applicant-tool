@@ -308,6 +308,7 @@ class TestConfigWiring:
             ("X-Trace", "abc")
         ]
         assert tool.get_test_ai().extra_headers == [("X-Trace", "abc")]
+        assert tool.get_editor_ai().extra_headers == [("X-Trace", "abc")]
 
     def test_test_falls_back_to_cover_letter(self):
         """Пока раздела openai_test нет, тесты ходят туда же, куда письма:
@@ -337,6 +338,38 @@ class TestConfigWiring:
         tool = _tool()
 
         assert tool.get_test_ai().system_prompt != tool.get_cover_letter_ai(
+            "пиши письмо"
+        ).system_prompt
+
+    def test_editor_falls_back_to_cover_letter(self):
+        """Раздел openai_editor заводить необязательно: пока его нет,
+        редактор ходит туда же, куда письма, но со своим промптом."""
+        tool = _tool(
+            openai_cover_letter={
+                "model": "letter-model",
+                "extra_headers": {"X-Goal": "letter"},
+            }
+        )
+
+        client = tool.get_editor_ai()
+
+        assert client.model == "letter-model"
+        assert client.extra_headers == [("X-Goal", "letter")]
+
+    def test_editor_own_section_wins_over_fallback(self):
+        tool = _tool(
+            openai_cover_letter={"model": "letter-model"},
+            openai_editor={"model": "editor-model"},
+        )
+
+        assert tool.get_editor_ai().model == "editor-model"
+
+    def test_editor_prompt_is_not_the_letter_prompt(self):
+        """Редактор правит готовый текст, а не сочиняет письмо: свой
+        промпт тут обязателен."""
+        tool = _tool()
+
+        assert tool.get_editor_ai().system_prompt != tool.get_cover_letter_ai(
             "пиши письмо"
         ).system_prompt
 

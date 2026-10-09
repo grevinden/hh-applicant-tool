@@ -118,6 +118,8 @@ class Operation(BaseOperation):
             if args.use_ai
             else None
         )
+        # Второй вызов модели: редактор готового сообщения.
+        self.editor_ai = tool.get_editor_ai() if args.use_ai else None
         self.period = args.period
 
         logger.debug(f"{self.reply_message = }")
@@ -334,6 +336,18 @@ class Operation(BaseOperation):
                             )
                             print("❌ Отмена заявки", vacancy["alternate_url"])
                             continue
+
+                    # Редактор очеловечивает готовый текст. Ему уходит
+                    # только сообщение, поэтому сбой редактора не должен
+                    # мешать отправке — шлём исходный вариант.
+                    if self.editor_ai and send_message:
+                        try:
+                            send_message = self.editor_ai.complete(send_message)
+                            logger.debug(f"Edited message: {send_message}")
+                        except AIError as ex:
+                            logger.warning(
+                                f"Ошибка OpenAI редактора для чата {nid}: {ex}"
+                            )
 
                     # Финальная отправка текста
                     if self.dry_run:

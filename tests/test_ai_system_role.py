@@ -201,6 +201,7 @@ class TestToolWiring:
         assert tool.get_chat_ai("prompt").system_role == "developer"
         assert tool.get_cover_letter_ai("prompt").system_role == "developer"
         assert tool.get_vacancy_filter_ai("prompt").system_role == "developer"
+        assert tool.get_editor_ai().system_role == "developer"
 
     def test_no_role_flag_in_parser(self):
         """Роль задаёт модель в конфиге, а не флаг запуска."""

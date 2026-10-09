@@ -197,6 +197,7 @@ class TestCoverLetterPrompt:
         operation.cover_letter = "письмо"
         operation.cover_letter_ai = MagicMock()
         operation.cover_letter_ai.complete.return_value = "Здравствуйте!"
+        operation.editor_ai = None
         operation._get_vacancies = lambda resume_id=None, resume_title="": (
             iter([dict(VACANCY)])
         )
@@ -240,6 +241,7 @@ class TestIdsInFlow:
         operation.force_message = False
         operation.cover_letter = "письмо"
         operation.cover_letter_ai = None
+        operation.editor_ai = None
         operation._analyze_resume_heavy = lambda resume: "resume details"
         operation._resume_analysis_cache = {}
         operation.__dict__["api_client"] = MagicMock()
