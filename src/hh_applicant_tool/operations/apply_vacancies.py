@@ -609,20 +609,23 @@ class Operation(BaseOperation):
                 if title:
                     parts.append(f"Должность: {title}")
 
-                if "skills" in full_resume:
+                # hh.ru отдаёт skills как null, когда поле не заполнено.
+                # Раньше заголовок печатался и с пустым телом, поэтому в
+                # запрос к модели уходили пустые разделы «О СЕБЕ».
+                skills_text = full_resume.get("skills")
+                if skills_text:
                     parts.append("\n---------- О СЕБЕ ----------")
-                    # hh.ru отдаёт skills как null, когда поле не заполнено,
-                    # и .get(..., "") тут не спасает: null уже есть в ответе
-                    parts.append(full_resume.get("skills") or "")
+                    parts.append(str(skills_text))
 
-                if "skill_set" in full_resume and full_resume["skill_set"]:
+                skill_set = full_resume.get("skill_set")
+                if skill_set:
                     parts.append("\n---------- НАВЫКИ ----------")
-                    skills_row = ", ".join(full_resume["skill_set"])
-                    parts.append(skills_row)
+                    parts.append(", ".join(skill_set))
 
-                if "experience" in full_resume:
+                experience = full_resume.get("experience")
+                if experience:
                     parts.append("\n---------- ОПЫТ РАБОТЫ ----------")
-                    for exp in full_resume.get("experience", []):
+                    for exp in experience:
                         company = exp.get("company", "Не указано")
                         position = exp.get("position", "Не указано")
                         start = exp.get("start", "")
@@ -636,6 +639,94 @@ class Operation(BaseOperation):
                         if description:
                             parts.append(" Описание:")
                             parts.append(f" {description}")
+
+                education = full_resume.get("education") or {}
+                education_lines = []
+                for item in education.get("primary") or []:
+                    name = item.get("name")
+                    if name:
+                        education_lines.append(f"- {name}")
+                    organization = item.get("organization")
+                    if organization:
+                        education_lines.append(f"  Факультет: {organization}")
+                    result = item.get("result")
+                    if result:
+                        education_lines.append(f"  Специальность: {result}")
+                    level = (item.get("education_level") or {}).get("name")
+                    if not level:
+                        level = (education.get("level") or {}).get("name")
+                    if level:
+                        education_lines.append(f"  Уровень: {level}")
+                    year = item.get("year")
+                    if year:
+                        education_lines.append(f"  Год окончания: {year}")
+                for item in education.get("additional") or []:
+                    name = item.get("name")
+                    if name:
+                        education_lines.append(f"- {name}")
+                for item in education.get("attestation") or []:
+                    name = item.get("name")
+                    if name:
+                        education_lines.append(f"- {name}")
+                if education_lines:
+                    parts.append("\n---------- ОБРАЗОВАНИЕ ----------")
+                    parts.extend(education_lines)
+
+                languages = []
+                for lang in full_resume.get("language") or []:
+                    name = lang.get("name")
+                    if not name:
+                        continue
+                    level = (lang.get("level") or {}).get("name")
+                    languages.append(f"{name} — {level}" if level else name)
+                if languages:
+                    parts.append("\n---------- ЯЗЫКИ ----------")
+                    parts.append(", ".join(languages))
+
+                roles = [
+                    role.get("name")
+                    for role in full_resume.get("professional_roles") or []
+                    if role.get("name")
+                ]
+                if roles:
+                    parts.append(
+                        "\n---------- ПРОФЕССИОНАЛЬНЫЕ РОЛИ ----------"
+                    )
+                    parts.append(", ".join(roles))
+
+                extra = []
+                area = full_resume.get("area") or {}
+                if area.get("name"):
+                    extra.append(f"Город: {area['name']}")
+                salary = full_resume.get("salary") or {}
+                if salary.get("amount"):
+                    currency = salary.get("currency", "")
+                    extra.append(
+                        f"Желаемая зарплата: {salary['amount']} {currency}".strip()
+                    )
+                age = full_resume.get("age")
+                if age:
+                    extra.append(f"Возраст: {age}")
+                total_experience = full_resume.get("total_experience") or {}
+                months = total_experience.get("months")
+                if months:
+                    extra.append(
+                        f"Общий опыт: {months // 12} г. {months % 12} мес."
+                    )
+                work_format = [
+                    wf.get("name")
+                    for wf in full_resume.get("work_format") or []
+                    if wf.get("name")
+                ]
+                if work_format:
+                    extra.append("Формат работы: " + ", ".join(work_format))
+                trips = (full_resume.get("business_trip_readiness") or {})
+                trips_name = trips.get("name")
+                if trips_name:
+                    extra.append(f"Командировки: {trips_name}")
+                if extra:
+                    parts.append("\n---------- ДОПОЛНИТЕЛЬНО ----------")
+                    parts.extend(extra)
 
                 result = "\n".join(parts)
                 self._resume_analysis_cache[cache_key] = result
@@ -694,15 +785,28 @@ class Operation(BaseOperation):
         if name:
             parts.append(f"Вакансия: {name}")
 
-        if full_vacancy:
-            description = full_vacancy.get("description")
-            if description:
-                parts.append(f"Описание: {strip_tags(description)}")
-        else:
-            if vacancy.get("id"):
-                key_skills = self._get_vacancy_key_skills(vacancy["id"])
-                if key_skills:
-                    parts.append(f"Ключевые навыки: {key_skills}")
+        source = full_vacancy or vacancy or {}
+        employer = source.get("employer") or vacancy.get("employer") or {}
+        employer_name = employer.get("name")
+        if employer_name:
+            parts.append(f"Работодатель: {employer_name}")
+
+        description = source.get("description")
+        if description:
+            parts.append(f"Описание: {strip_tags(description)}")
+
+        key_skills = source.get("key_skills")
+        skills_text = ""
+        if key_skills:
+            skills_text = ", ".join(
+                skill["name"]
+                for skill in key_skills
+                if skill.get("name")
+            )
+        elif not full_vacancy and vacancy.get("id"):
+            skills_text = self._get_vacancy_key_skills(vacancy["id"])
+        if skills_text:
+            parts.append(f"Ключевые навыки: {skills_text}")
 
         return "\n".join(parts)
 
