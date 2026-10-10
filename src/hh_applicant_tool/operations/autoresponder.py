@@ -83,6 +83,8 @@ class Operation(BaseOperation):
 
     def run(self, tool: HHApplicantTool, args: Namespace) -> None:
         self.tool = tool
+
+        # Этот костыль убрать везде надо
         cancel_event = getattr(args, "_cancel_event", Event())
         logger.info("Автоответчик запущен")
 
@@ -133,10 +135,8 @@ class Operation(BaseOperation):
 
     @cached_property
     def chat_url(self) -> str:
-        rc, _ = self.tool.get_initial_state(
-            "https://hh.ru/applicant/my_resumes"
-        )
-        return rc["config"]["externalMicroFrontendHosts"]["chatik"]
+        r = self.tool.get_initial_state("https://hh.ru/applicant/my_resumes")
+        return r["config"]["externalMicroFrontendHosts"]["chatik"]
 
     def get_chats(
         self,
