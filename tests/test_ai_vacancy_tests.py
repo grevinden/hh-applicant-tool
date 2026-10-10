@@ -32,6 +32,21 @@ VACANCY = {
     "employer": {"id": "222", "name": "ООО Ромашка"},
 }
 
+FULL_RESUME = {
+    "title": "Python разработчик",
+    "skills": "Пишу на Python 12 лет",
+    "skill_set": ["Python", "Django"],
+    "experience": [
+        {
+            "company": "Ромашка",
+            "position": "Backend-разработчик",
+            "start": "2010-01-01",
+            "end": "2022-01-01",
+            "description": "Делал сервисы на Python",
+        }
+    ],
+}
+
 TESTS_DATA = {
     "111": {
         "uidPk": "uid",
@@ -64,6 +79,12 @@ def make_operation(answer: str | None = "10") -> Operation:
     operation.tool.session.post.return_value = MagicMock(
         json=lambda: {"success": "true"}
     )
+    # Резюме и вакансию тянем текстом, как в боевом запуске: без этих
+    # заглушек _analyze_resume_heavy уходит в сеть через api_client,
+    # которого у голого Operation нет.
+    operation._resume_analysis_cache = {}
+    operation._get_full_resume = lambda resume_id: FULL_RESUME
+    operation._get_full_vacancy = lambda vacancy: None
     return operation
 
 
@@ -108,6 +129,22 @@ class TestChoiceQuestion:
         prompt = operation.test_ai.answer_test_question.call_args.args[0]
         assert "https://hh.ru/vacancy/111" in prompt
         assert "резюме: resume-1" in prompt
+
+    def test_resume_text_is_passed_to_the_model(self):
+        """По одному id резюме модель о кандидате ничего не знает."""
+        operation = make_operation("10")
+
+        operation._solve_vacancy_test(
+            vacancy_id="111",
+            resume_hash="resume-1",
+            vacancy=VACANCY,
+            resume=RESUME,
+        )
+
+        prompt = operation.test_ai.answer_test_question.call_args.args[0]
+        assert "[РЕЗЮМЕ]" in prompt
+        assert "Пишу на Python 12 лет" in prompt
+        assert "Senior Python" in prompt
 
     def test_empty_answer_skips_vacancy(self):
         """Неуверенность — повод не отвечать, а не гадать."""

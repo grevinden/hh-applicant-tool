@@ -2249,6 +2249,37 @@ class Operation(BaseOperation):
         # выше у модели нет
         ids_context = self._build_ids_context(vacancy=vacancy, resume=resume)
 
+        # Одних идентификаторов для ответа мало: вопрос теста часто про
+        # самого соискателя («расскажите о себе», «есть ли опыт с X»), а
+        # по ссылке и хешу резюме модель о кандидате ничего не знает и
+        # отвечает обтекаемо. Поэтому текст вакансии и резюме отдаём так
+        # же, как в сопроводительном письме.
+        try:
+            full_vacancy = (
+                self._get_full_vacancy(vacancy) if vacancy else None
+            )
+        except Exception as ex:
+            logger.warning(
+                "Не удалось загрузить вакансию %s: %s", vacancy_id, ex
+            )
+            full_vacancy = None
+
+        context_parts: list[str] = []
+        if vacancy:
+            vacancy_context = self._build_vacancy_context(
+                vacancy,
+                full_vacancy=full_vacancy,
+                include_full=True,
+            )
+            if vacancy_context:
+                context_parts.append(f"[ВАКАНСИЯ]\n{vacancy_context}")
+
+        resume_context = self._analyze_resume_heavy(resume) if resume else ""
+        if resume_context:
+            context_parts.append(f"[РЕЗЮМЕ]\n{resume_context}")
+
+        candidate_context = "\n\n".join(context_parts)
+
         for task in test_data["tasks"]:
             field_name = f"task_{task['id']}"
             solutions = task.get("candidateSolutions") or []
@@ -2267,6 +2298,8 @@ class Operation(BaseOperation):
                         f"Варианты:\n{options}\n"
                         f"{TEST_CHOICE_PROMPT}"
                     )
+                    if candidate_context:
+                        prompt = f"{candidate_context}\n\n{prompt}"
                     if ids_context:
                         prompt = f"{prompt}\n{ids_context}"
                     ai_answer = self.test_ai.answer_test_question(prompt)
@@ -2309,6 +2342,8 @@ class Operation(BaseOperation):
                         "Дай краткий и профессиональный ответ на "
                         f"вопрос: {question}"
                     )
+                    if candidate_context:
+                        prompt = f"{candidate_context}\n\n{prompt}"
                     if ids_context:
                         prompt = f"{prompt}\n{ids_context}"
                     answer = self.test_ai.answer_test_question(prompt)
