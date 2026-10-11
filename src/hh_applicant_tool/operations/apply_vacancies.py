@@ -1778,6 +1778,22 @@ class Operation(BaseOperation):
                 if not do_apply:
                     continue
 
+                # Проверку «уже отклонена/пропущена ранее» делаем до всего
+                # цикла: до фильтра-исключения и до любых вызовов модели
+                # (фильтр, письмо, тест). Иначе вакансию, отброшенную в
+                # прошлом запуске, программа заново прогоняет через модель,
+                # а сообщение об этом печатает в самом конце.
+                if self._is_vacancy_already_skipped(vacancy, resume["id"]):
+                    logger.debug(
+                        "Вакансия уже была отклонена ранее: %s",
+                        vacancy["alternate_url"],
+                    )
+                    print(
+                        "⏩ Вакансия уже отклонена ранее",
+                        vacancy["alternate_url"],
+                    )
+                    continue
+
                 vacancy_id = vacancy["id"]
                 relations = vacancy.get("relations", [])
 
@@ -1838,17 +1854,6 @@ class Operation(BaseOperation):
 
                 # AI фильтрация вакансий
                 if self.ai_filter and self.vacancy_filter_ai:
-                    if self._is_vacancy_already_skipped(vacancy, resume["id"]):
-                        logger.debug(
-                            "Вакансия уже была отклонена ранее: %s",
-                            vacancy["alternate_url"],
-                        )
-                        print(
-                            "⏩ Вакансия уже отклонена ранее",
-                            vacancy["alternate_url"],
-                        )
-                        continue
-
                     if self.ai_filter in ("heavy", "custom"):
                         is_suitable = self._is_vacancy_suitable_heavy(
                             vacancy,
