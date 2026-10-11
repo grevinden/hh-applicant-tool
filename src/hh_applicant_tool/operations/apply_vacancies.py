@@ -2374,41 +2374,82 @@ class Operation(BaseOperation):
         # Ожидание перед отправкой (float)
         time.sleep(random.uniform(2.0, 3.0))
 
-        response = self.tool.session.post(
-            "https://hh.ru/applicant/vacancy_response/popup",
-            data=payload,
-            headers={
-                "Referer": response_url,
-                # x-gib-fgsscgib-w-hh и x-gib-gsscgib-w-hh вроде в куках
-                # передаются и не нужны
-                "X-Hhtmfrom": "vacancy",
-                "X-Hhtmsource": "vacancy_response",
-                "X-Requested-With": "XMLHttpRequest",
-                "X-Xsrftoken": self.tool.xsrf_token,
-            },
-        )
+        url = "https://hh.ru/applicant/vacancy_response/popup"
+        headers = {
+            "Referer": response_url,
+            # x-gib-fgsscgib-w-hh и x-gib-gsscgib-w-hh вроде в куках
+            # передаются и не нужны
+            "X-Hhtmfrom": "vacancy",
+            "X-Hhtmsource": "vacancy_response",
+            "X-Requested-With": "XMLHttpRequest",
+            "X-Xsrftoken": self.tool.xsrf_token,
+        }
 
-        logger.debug(
-            "%s %s %d",
-            response.request.method,
-            response.url,
-            response.status_code,
-        )
-
-        try:
-            data = response.json()
-        except (ValueError, requests.exceptions.JSONDecodeError) as ex:
-            logger.warning(
-                "Ответ на отклик с тестом не является JSON (status=%s, %s), result: %s",
-                response.status_code,
-                response.url,
-                shorten(response.text, 300),
+        # hh.ru на отклик с тестом может ответить не отказом, а капчей:
+        # HTTP 200 и {'hhcaptcha': {'isBot': true, 'captchaState': ...}}.
+        # Решаем её тем же пайплайном, что и обычные отклики, и повторяем
+        # POST — иначе отклик с тестом просто не уходит.
+        for captcha_attempt in range(1, self.CAPTCHA_MAX_ATTEMPTS + 1):
+            response = self.tool.session.post(
+                url,
+                data=payload,
+                headers=headers,
             )
-            raise ValueError(
-                "Эндпоинт отклика на тест вернул не-JSON ответ "
-                "(возможно, перенаправление на капчу или форму)."
-            ) from ex
 
+            logger.debug(
+                "%s %s %d",
+                response.request.method,
+                response.url,
+                response.status_code,
+            )
+
+            try:
+                data = response.json()
+            except (ValueError, requests.exceptions.JSONDecodeError) as ex:
+                logger.warning(
+                    "Ответ на отклик с тестом не является JSON (status=%s, %s), result: %s",
+                    response.status_code,
+                    response.url,
+                    shorten(response.text, 300),
+                )
+                raise ValueError(
+                    "Эндпоинт отклика на тест вернул не-JSON ответ "
+                    "(возможно, перенаправление на капчу или форму)."
+                ) from ex
+
+            captcha = data.get("hhcaptcha") if isinstance(data, dict) else None
+            state = (
+                captcha.get("captchaState")
+                if isinstance(captcha, dict)
+                else None
+            )
+            if not state:
+                return data
+
+            logger.warning(
+                "Отклик на тест требует капчу (попытка %d/%d), решаю",
+                captcha_attempt,
+                self.CAPTCHA_MAX_ATTEMPTS,
+            )
+            captcha_url = "https://hh.ru/account/captcha?" + urlencode(
+                {"state": str(state)}
+            )
+            if not self.tool.solve_captcha_url(
+                captcha_url, referer_url=response_url
+            ):
+                # Решить не удалось. Возвращаем ответ hh.ru как есть:
+                # вызывающий код увидит hhcaptcha и залогирует ошибку
+                logger.error(
+                    "Не удалось решить капчу при отклике на тест: %s",
+                    vacancy_id,
+                )
+                return data
+
+        logger.error(
+            "Капча при отклике на тест не пройдена за %d попыток: %s",
+            self.CAPTCHA_MAX_ATTEMPTS,
+            vacancy_id,
+        )
         return data
 
     def _parse_site(self, url: str) -> dict[str, Any]:

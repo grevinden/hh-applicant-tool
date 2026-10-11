@@ -258,6 +258,56 @@ class TestTextQuestion:
         operation.test_ai.complete.assert_not_called()
 
 
+class TestCaptchaOnTestSubmit:
+    def test_captcha_is_solved_and_post_retried(self):
+        """hh.ru может ответить капчей вместо отклика — её надо решить."""
+        operation = make_operation("10")
+        captcha_response = MagicMock(
+            json=lambda: {
+                "hhcaptcha": {"isBot": True, "captchaState": "state-1"}
+            }
+        )
+        success_response = MagicMock(json=lambda: {"success": "true"})
+        operation.tool.session.post.side_effect = [
+            captcha_response,
+            success_response,
+        ]
+        operation.tool.solve_captcha_url = MagicMock(return_value=True)
+
+        result = operation._solve_vacancy_test(
+            vacancy_id="111",
+            resume_hash="resume-1",
+            vacancy=VACANCY,
+            resume=RESUME,
+        )
+
+        operation.tool.solve_captcha_url.assert_called_once()
+        captcha_url = operation.tool.solve_captcha_url.call_args.args[0]
+        assert "state=state-1" in captcha_url
+        assert operation.tool.session.post.call_count == 2
+        assert result == {"success": "true"}
+
+    def test_unresolved_captcha_returns_error_payload(self):
+        """Капчу решить не удалось — отклик не отправлен, ответ как есть."""
+        operation = make_operation("10")
+        operation.tool.session.post.return_value = MagicMock(
+            json=lambda: {
+                "hhcaptcha": {"isBot": True, "captchaState": "state-1"}
+            }
+        )
+        operation.tool.solve_captcha_url = MagicMock(return_value=False)
+
+        result = operation._solve_vacancy_test(
+            vacancy_id="111",
+            resume_hash="resume-1",
+            vacancy=VACANCY,
+            resume=RESUME,
+        )
+
+        assert "hhcaptcha" in result
+        operation.tool.session.post.assert_called_once()
+
+
 class TestUnansweredTestIsValueError:
     def test_callers_keeping_value_error_still_catch_it(self):
         """Код вокруг решения теста ловит ValueError."""
