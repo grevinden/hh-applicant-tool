@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from . import utils
 
-CONFIG_DIR = utils.get_config_path()
+CONFIG_DIR = utils.get_config_directory()
 CONFIG_FILENAME = "config.toml"
 LOG_FILENAME = "log.txt"
 DATABASE_FILENAME = "data"
