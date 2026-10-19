@@ -574,10 +574,21 @@ class ChatOpenAI:
         "Answer with a JSON object only, of the form "
         '{"answer": "..."} , with exactly this one key, no explanation and '
         "no other keys. "
-        "If you do not know the answer or the information is not enough, "
-        "answer with an empty string: {\"answer\": \"\"}. An empty answer is "
-        "normal and expected in that case. Do not explain why you are "
-        "unsure, do not apologise and do not add any text outside the JSON."
+        # Пустой ответ раньше был объявлен нормой («An empty answer is
+        # normal and expected»), и модель пользовалась этой лазейкой на
+        # вопросах про график, занятость, переезд и зарплату, хотя ответ
+        # есть в данных о соискателе. Отказ там, где данные есть, дорого
+        # стоит: пустой ответ закрывает вакансию целиком (UnansweredTest),
+        # поэтому пустую строку оставляем только для вопросов, ответа на
+        # которые в данных действительно нет.
+        "Answer from the candidate data above. Questions about working "
+        "conditions, schedule, employment type, work format, relocation, "
+        "business trips, salary expectation, age, education or experience "
+        "are answered from that data, not refused. "
+        "Only if the question truly cannot be answered from the data, "
+        'answer with an empty string: {"answer": ""}. Do not explain why you '
+        "are unsure, do not apologise and do not add any text outside the "
+        "JSON."
     )
 
     @staticmethod

@@ -720,6 +720,21 @@ class Operation(BaseOperation):
                 ]
                 if work_format:
                     extra.append("Формат работы: " + ", ".join(work_format))
+                # График, занятость и переезд нужны не фильтру, а тестам:
+                # вопросы теста про «какой график вам подходит», «полная
+                # занятость или частичная», «готовы ли к переезду» иначе
+                # остаются без ответа, и вакансия пропускается целиком.
+                schedule = (full_resume.get("schedule") or {}).get("name")
+                if schedule:
+                    extra.append(f"График работы: {schedule}")
+                employment = (full_resume.get("employment") or {}).get("name")
+                if employment:
+                    extra.append(f"Тип занятости: {employment}")
+                relocation_type = (full_resume.get("relocation") or {}).get(
+                    "type"
+                ) or {}
+                if relocation_type.get("name"):
+                    extra.append(f"Переезд: {relocation_type['name']}")
                 trips = (full_resume.get("business_trip_readiness") or {})
                 trips_name = trips.get("name")
                 if trips_name:
